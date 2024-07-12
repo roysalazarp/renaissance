@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <libpq-fe.h>
 #include <linux/limits.h>
@@ -8,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /**
@@ -19,16 +21,18 @@
 
 #define MAX_LINE_LENGTH 160
 #define MAX_ABSOLUTE_PATH_LENGTH 200
+#define MAX_PATH_LENGTH 200
+#define MAX_HTML_FILES 20
+#define MAX_ID_LENGTH 80
+#define MAX_ERROR_MSG_LENGTH 248
 
-#define MAX_PROJECT_ROOT_PATH_LENGTH 120
+#define MAX_CONNECTIONS 100
 #define PROJECT_ROOT_PATH "/workspaces/web-server/"
 
 typedef struct ClientSocketQueueNode {
     struct ClientSocketQueueNode *next;
     int *client_socket;
 } ClientSocketQueueNode;
-
-#define MAX_ERROR_MSG_LENGTH 248
 
 typedef struct {
     char message[MAX_ERROR_MSG_LENGTH];
@@ -94,9 +98,8 @@ typedef struct {
     Template *component;
 } Component;
 
-#define MAX_TEMPLATE_NAME_LENGTH 68
 struct Template {
-    char path[MAX_ABSOLUTE_PATH_LENGTH];
+    char *name;
     char *composed_html_content;
     char *html_content;
     size_t html_content_length;
@@ -113,6 +116,8 @@ Error router(void *p_client_socket, uint8_t thread_index);
 void *thread_function(void *arg);
 void enqueue_client_socket(int *client_socket);
 void *dequeue_client_socket();
+Error sign_up_create_user_post(int client_socket, HttpRequest *request, uint8_t thread_index);
+Error sign_up_get(int client_socket, HttpRequest *request, uint8_t thread_index);
 Error home_get(int client_socket, HttpRequest *request, uint8_t thread_index);
 Error read_request(char **request_buffer, int client_socket);
 Error parse_http_request(HttpRequest *parsed_http_request, const char *http_request);
@@ -121,14 +126,18 @@ Error not_found(int client_socket, HttpRequest *request);
 Error load_values_from_file(void *structure, const char *project_root_path, const char *file_path_relative_to_project_root);
 void print_query_result(PGresult *query_result);
 Error read_file(char **buffer, char *absolute_file_path, size_t file_size);
-Error resolve_component_lookups(Template *template);
 Error resolve_component_imports(Template *template);
-
-#define MAX_CONNECTIONS 100
-#define POOL_SIZE 1
-#define ROWS 4
+Error get_html_files_paths(char **html_files_paths, const char *base_path, uint8_t level, uint8_t *total_html_files);
+void free_html_files_paths(char **html_files_paths);
+void free_all_templates(Template **templates, uint8_t number_of_blocks);
+Error calculate_file_size(long *file_size, char *absolute_file_path);
+Error url_decode(char **string);
+Error parse_value(char buffer[], const char key_name[], char *string);
+char hex_to_char(char c);
 
 volatile sig_atomic_t keep_running = 1;
+
+#define POOL_SIZE 1
 
 PGconn *conn_pool[POOL_SIZE];
 
@@ -139,165 +148,23 @@ pthread_cond_t thread_condition_var = PTHREAD_COND_INITIALIZER;
 ClientSocketQueueNode *head_client_socket_queue = NULL;
 ClientSocketQueueNode *tail_client_socket_queue = NULL;
 
-/* clang-format off */
-/*********************************[ STATUS ]***********************************/
+Template **templates;
 
-#define STATUS_PATH PROJECT_ROOT_PATH "status.html"
-Template status = {
-    STATUS_PATH,
-    NULL,
-    NULL,
-    (111 + 1),
-    NULL,
-    NULL,
-    NULL,
-    0,
-    0,
-    0
-};
-
-/*********************************[ BUTTON ]***********************************/
-
-#define MAX_BUTTON_VALUES 1
-Value button__values[MAX_BUTTON_VALUES] = {
-    {"button_name", "{{ button_name }}"},
-};
-
-#define MAX_BUTTON_COMPONENTS 1
-Component button__components[MAX_BUTTON_COMPONENTS] = {
-    {{NULL, 118, 151}, &status},
-};
-
-#define BUTTON_PATH PROJECT_ROOT_PATH "button.html"
-Template button = {
-    BUTTON_PATH,
-    NULL,
-    NULL,
-    (183 + 1),
-    NULL,
-    button__components,
-    button__values,
-    0,
-    MAX_BUTTON_COMPONENTS,
-    MAX_BUTTON_VALUES
-};
-
-/***********************************[ FOO ]************************************/
-
-#define MAX_FOO_BLOCKS_VALUES 1
-Value foo__blocks_values[MAX_FOO_BLOCKS_VALUES] = {
-    {"admin_user_id", "{{ admin_user_id }}"},
-};
-
-#define MAX_FOO_BLOCKS 1
-ActionBlock foo__blocks[MAX_FOO_BLOCKS] = {
-    {
-        "admin_users",
-        {NULL, 36, 80},
-        {NULL, 10, 94},
-        NULL,
-        FOR,
-        0
-    }, 
-};
-
-#define FOO_PATH PROJECT_ROOT_PATH "foo.html"
-Template foo = {
-    FOO_PATH,
-    NULL,
-    NULL,
-    (101 + 1),
-    foo__blocks,
-    NULL,
-    foo__blocks_values,
-    MAX_FOO_BLOCKS,
-    0,
-    MAX_FOO_BLOCKS_VALUES
-};
-
-/******************************[ DEFAULT PAGE ]********************************/
-
-#define MAX_DEFAULT_PAGE_BLOCKS 1
-ActionBlock default_page__blocks[MAX_DEFAULT_PAGE_BLOCKS] = {
-    {
-        "clickable_buttons",
-        {NULL, 823, 889},
-        {NULL, 787, 907},
-        NULL,
-        FOR,
-        0
-    }, 
-};
-
-#define MAX_DEFAULT_PAGE_VALUES 2
-Value default_page__values[MAX_DEFAULT_PAGE_VALUES] = {
-    {"username", "{{ username }}"},
-    {"user_id", "{{ user_id }}"},
-};
-
-#define MAX_DEFAULT_PAGE_COMPONENTS 1
-Component default_page__components[MAX_DEFAULT_PAGE_COMPONENTS] = {
-    {{NULL, 841, 874}, &button},
-};
-
-#define DEFAULT_PAGE_PATH PROJECT_ROOT_PATH "default.html"
-Template default_page = {
-    DEFAULT_PAGE_PATH,
-    NULL,
-    NULL,
-    (927 + 1),
-    default_page__blocks,
-    default_page__components,
-    default_page__values,
-    MAX_DEFAULT_PAGE_BLOCKS,
-    MAX_DEFAULT_PAGE_COMPONENTS,
-    MAX_DEFAULT_PAGE_VALUES
-};
-
-/*******************************[ HOME PAGE ]**********************************/
-
-#define MAX_HOME_PAGE_COMPONENTS 2
-Component home_page__components[MAX_HOME_PAGE_COMPONENTS] = {
-    {{NULL, 753, 786}, &status},
-    {{NULL, 799, 829}, &foo},
-};
-
-#define HOME_PAGE_PATH PROJECT_ROOT_PATH "home.html"
-Template home_page = {
-    HOME_PAGE_PATH,
-    NULL,
-    NULL,
-    (864 + 1),
-    NULL,
-    home_page__components,
-    NULL,
-    0,
-    MAX_HOME_PAGE_COMPONENTS,
-    0
-};
-
-/*******************************[ TEMPLATES ]**********************************/
-
-#define MAX_TEMPLATES 3
-Template *templates[MAX_TEMPLATES] = {
-    &default_page,
-    &home_page,
-    &status,
-};
-
-#define MAX_ALL_TEMPLATES 5
-Template *all_templates[MAX_ALL_TEMPLATES] = {
-    &default_page,
-    &home_page,
-    &status,
-    &button,
-    &foo,
-};
-/* clang-format on */
+#define BLOCK_ID_START "{{ block \""
+#define BLOCK_ID_END "\" }}"
+#define ID_START "{{ "
+#define SLOT_ID_START "{{ slot"
+#define TEMPLATE_ID_START "{{ template \""
+#define TEMPLATE_ID_END "\" }}"
+#define OPTIONAL_NAME_ID_START "{{ ."
+#define FOR_ID_START "{{ for"
+#define END_ID "{{ end }}"
 
 int main() {
     int retval = 0;
+
     uint8_t i;
+    char *temp;
 
     Error error = {0};
 
@@ -311,89 +178,356 @@ int main() {
         goto main_exit;
     }
 
-    for (i = 0; i < MAX_ALL_TEMPLATES; i++) {
-        Template *template = all_templates[i];
+    /* ⬇ Find all HTML files down from a given base directory ⬇ */
 
-        template->html_content = (char *)calloc(template->html_content_length, sizeof(char));
-        if (template->html_content == NULL) {
-            fprintf(stderr, "Failed to allocate memory for template->html_content\nError code: %d\n", errno);
+    char **html_files_paths = (char **)calloc(MAX_HTML_FILES, sizeof(char *));
+    if (html_files_paths == NULL) {
+        fprintf(stderr, "Failed to allocate memory for html_files_paths\nError code: %d\n", errno);
+        retval = -1;
+        goto main_exit;
+    }
+
+    for (i = 0; i < MAX_HTML_FILES; i++) {
+        html_files_paths[i] = (char *)calloc(MAX_PATH_LENGTH, sizeof(char));
+
+        if (html_files_paths[i] == NULL) {
+            free_html_files_paths(html_files_paths);
+            fprintf(stderr, "Failed to allocate memory for html_files_paths[%d]\nError code: %d\n", i, errno);
             retval = -1;
-            goto main_cleanup_templates;
-        }
-
-        if ((error = read_file(&(template->html_content), template->path, (template->html_content_length - 1))).panic) {
-            retval = -1;
-            goto main_cleanup_templates;
-        }
-
-        template->html_content[template->html_content_length - 1] = '\0';
-
-        uint8_t z;
-        for (z = 0; z < template->blocks_length; z++) {
-            ActionBlock *block = &(template->blocks[z]);
-
-            size_t block_html_content_length = (block->html.end - block->html.start) + 1;
-
-            block->html.content = (char *)calloc(block_html_content_length, sizeof(char));
-            if (block->html.content == NULL) {
-                fprintf(stderr, "Failed to allocate memory for block->html.content\nError code: %d\n", errno);
-                retval = -1;
-                goto main_cleanup_templates;
-            }
-
-            if (memcpy(block->html.content, template->html_content + block->html.start, (block_html_content_length - 1)) == NULL) {
-                fprintf(stderr, "Failed to copy into block->html.content\nError code: %d\n", errno);
-                retval = -1;
-                goto main_cleanup_templates;
-            }
-
-            block->html.content[block_html_content_length - 1] = '\0';
-
-            size_t block_lookup_reference_length = (block->lookup.end - block->lookup.start) + 1;
-
-            block->lookup.reference = (char *)calloc(block_lookup_reference_length, sizeof(char));
-            if (block->lookup.reference == NULL) {
-                fprintf(stderr, "Failed to allocate memory for block->lookup.reference\nError code: %d\n", errno);
-                retval = -1;
-                goto main_cleanup_templates;
-            }
-
-            if (memcpy(block->lookup.reference, template->html_content + block->lookup.start, (block_lookup_reference_length - 1)) == NULL) {
-                fprintf(stderr, "Failed to copy into block->lookup.reference\nError code: %d\n", errno);
-                retval = -1;
-                goto main_cleanup_templates;
-            }
-
-            block->lookup.reference[block_lookup_reference_length - 1] = '\0';
+            goto main_exit;
         }
     }
 
-    for (i = 0; i < MAX_TEMPLATES; i++) {
+    const char *base_path = "./templates";
+    uint8_t total_html_files = 0;
+    if ((error = get_html_files_paths(html_files_paths, base_path, 0, &total_html_files)).panic) {
+        free_html_files_paths(html_files_paths);
+        retval = -1;
+        goto main_exit;
+    }
+
+    long html_files_paths_lengths[MAX_HTML_FILES];
+
+    for (i = 0; i < MAX_HTML_FILES; i++) {
+        html_files_paths_lengths[i] = 0;
+    }
+
+    long templates_collection_length = 0;
+    for (i = 0; i < total_html_files; i++) {
+        long html_file_length = 0;
+        if ((error = calculate_file_size(&html_file_length, html_files_paths[i])).panic) {
+            free_html_files_paths(html_files_paths);
+            retval = -1;
+            goto main_exit;
+        }
+
+        html_files_paths_lengths[i] = html_file_length;
+        templates_collection_length = templates_collection_length + html_file_length;
+    }
+
+    /* ⬇ Join all HTML blocks into a single 'templates_collection' buffer ⬇ */
+
+    char *templates_collection = (char *)calloc(templates_collection_length + 1, sizeof(char));
+    if (templates_collection == NULL) {
+        free_html_files_paths(html_files_paths);
+        fprintf(stderr, "Failed to allocate memory for templates_collection\nError code: %d\n", errno);
+        retval = -1;
+        goto main_exit;
+    }
+
+    temp = templates_collection;
+    for (i = 0; i < MAX_HTML_FILES; i++) {
+        if (html_files_paths_lengths[i] == 0) {
+            break;
+        }
+
+        if ((error = read_file(&temp, html_files_paths[i], html_files_paths_lengths[i])).panic) {
+            free_html_files_paths(html_files_paths);
+            retval = -1;
+            goto main_cleanup_templates_collection;
+        }
+
+        temp += html_files_paths_lengths[i];
+    }
+
+    templates_collection[templates_collection_length] = '\0';
+
+    temp = NULL;
+
+    free_html_files_paths(html_files_paths); /** Clear from memory information about server directories */
+
+    /* ⬇ Create 'Template' instances for each HTML block in 'templates_collection' ⬇ */
+    /* These instances will contain useful data and information that will help reduce HTML rendering work during request processing later on */
+
+    temp = templates_collection;
+    uint8_t number_of_blocks = 0;
+
+    while ((temp = strstr(temp, BLOCK_ID_START)) != NULL) {
+        number_of_blocks++;
+        temp += strlen(BLOCK_ID_START);
+    }
+
+    temp = NULL;
+
+    templates = (Template **)calloc(number_of_blocks, sizeof(Template *));
+    if (templates == NULL) {
+        fprintf(stderr, "Failed to allocate memory for templates\nError code: %d\n", errno);
+        retval = -1;
+        goto main_cleanup_templates_collection;
+    }
+
+    for (i = 0; i < number_of_blocks; i++) {
+        templates[i] = (Template *)malloc(sizeof(Template));
+
+        if (templates[i] == NULL) {
+            fprintf(stderr, "Failed to allocate memory for templates[%d]\nError code: %d\n", i, errno);
+            retval = -1;
+            goto main_cleanup_templates;
+        }
+
+        templates[i]->name = NULL;
+        templates[i]->composed_html_content = NULL;
+        templates[i]->html_content = NULL;
+        templates[i]->html_content_length = 0;
+        templates[i]->blocks = NULL;
+        templates[i]->components = NULL;
+        templates[i]->values = NULL;
+        templates[i]->blocks_length = 0;
+        templates[i]->components_length = 0;
+        templates[i]->values_length = 0;
+    }
+
+    /* ⬇⬇ Set 'name' for all 'Template' instances ⬇⬇ */
+
+    temp = templates_collection;
+    i = 0;
+    while ((temp = strstr(temp, BLOCK_ID_START)) != NULL) {
+        temp += strlen(BLOCK_ID_START);
+
+        uint8_t block_name_length = 0;
+        size_t j;
+        for (j = 0; temp[j] != '\0'; j++) {
+            if (temp[j] == '\"') {
+                break;
+            }
+
+            block_name_length++;
+        }
+
+        templates[i]->name = calloc(block_name_length + 1, sizeof(char));
+        if (templates[i]->name == NULL) {
+            fprintf(stderr, "Failed to allocate memory for templates[%d]->name\nError code: %d\n", i, errno);
+            retval = -1;
+            goto main_cleanup_templates;
+        }
+
+        if (memcpy(templates[i]->name, temp, block_name_length) == NULL) {
+            fprintf(stderr, "Failed to copy into templates[%d]->name\nError code: %d\n", i, errno);
+            retval = -1;
+            goto main_cleanup_templates;
+        }
+
+        templates[i]->name[block_name_length] = '\0';
+
+        i++;
+    }
+
+    temp = NULL;
+
+    /* ⬇⬇ Copy HTML block from 'templates_collection' into each 'Template' instance that matches name ⬇⬇ */
+
+    for (i = 0; i < number_of_blocks; i++) {
+        uint8_t block_name_length = (uint8_t)strlen(templates[i]->name);
+        uint8_t block_id_length = strlen(BLOCK_ID_START) + block_name_length + strlen(BLOCK_ID_END) + 1;
+
+        if (MAX_ID_LENGTH < block_id_length) {
+            fprintf(stderr, "block_id_length(%d) should not exceed MAX_ID_LENGTH(%d), you might want to increase MAX_ID_LENGTH\nError code: %d\n", block_id_length, MAX_ID_LENGTH, errno);
+            retval = -1;
+            goto main_cleanup_templates;
+        }
+
+        char block_id[MAX_ID_LENGTH];
+
+        if (sprintf(block_id, "%s%s%s", BLOCK_ID_START, templates[i]->name, BLOCK_ID_END) != (block_id_length - 1)) {
+            fprintf(stderr, "Failed to copy into block_id\nError code: %d\n", errno);
+            retval = -1;
+            goto main_cleanup_templates;
+        }
+
+        temp = templates_collection;
+        char *block_end = NULL;
+        while ((temp = strstr(temp, block_id)) != NULL) {
+            uint8_t inside_nested = 0;
+
+            /**
+             * Now that we have identified the block_id `{{ block "some_name" }}`,
+             * we proceed to locate its closing tag `{{ end }}`. Start by searching for the next `{{ `
+             */
+            char *temp2 = temp;
+            while ((temp2 = strstr(temp2 + strlen(ID_START), ID_START)) != NULL) {
+                /* clang-format off */
+                if (strncmp(temp2, SLOT_ID_START, strlen(SLOT_ID_START)) == 0 || 
+                    strncmp(temp2, TEMPLATE_ID_START, strlen(TEMPLATE_ID_START)) == 0 || 
+                    strncmp(temp2, OPTIONAL_NAME_ID_START, strlen(OPTIONAL_NAME_ID_START)) == 0) {
+                    continue;
+                }
+                /* clang-format on */
+
+                if (strncmp(temp2, FOR_ID_START, strlen(FOR_ID_START)) == 0) {
+                    inside_nested++;
+                    continue;
+                }
+
+                if (strncmp(temp2, END_ID, strlen(END_ID)) == 0) {
+                    if (inside_nested == 0) {
+                        block_end = temp2;
+                        break;
+                    }
+
+                    inside_nested--;
+                }
+            }
+
+            size_t html_content_length = block_end - (temp + block_id_length);
+            templates[i]->html_content = calloc(html_content_length + 1, sizeof(char));
+            if (templates[i]->html_content == NULL) {
+                fprintf(stderr, "Failed to allocate memory for templates[%d]->html_content\nError code: %d\n", i, errno);
+                retval = -1;
+                goto main_cleanup_templates;
+            }
+
+            templates[i]->html_content_length = html_content_length;
+
+            if (memcpy(templates[i]->html_content, temp + block_id_length, html_content_length) == NULL) {
+                fprintf(stderr, "Failed to copy into templates[%d]->html_content\nError code: %d\n", i, errno);
+                retval = -1;
+                goto main_cleanup_templates;
+            }
+
+            break; /** Stop at the first occurrence */
+        }
+
+        temp = NULL;
+    }
+
+    /* ⬇⬇ Link 'Template' instances when one uses another as a component ⬇⬇ */
+
+    for (i = 0; i < number_of_blocks; i++) {
         Template *template = templates[i];
-        if ((error = resolve_component_lookups(template)).panic) {
+
+        temp = template->html_content;
+        uint8_t number_of_component_imports = 0;
+
+        while ((temp = strstr(temp, TEMPLATE_ID_START)) != NULL) {
+            number_of_component_imports++;
+            temp += strlen(TEMPLATE_ID_START);
+        }
+
+        temp = NULL;
+
+        if (number_of_component_imports == 0) {
+            continue;
+        }
+
+        template->components_length = number_of_component_imports;
+
+        template->components = malloc(template->components_length * sizeof(Template *));
+        if (template->components == NULL) {
+            fprintf(stderr, "Failed to allocate memory for template->components\nError code: %d\n", errno);
             retval = -1;
             goto main_cleanup_templates;
         }
+
+        temp = template->html_content;
+
+        uint8_t j;
+        for (j = 0; j < template->components_length; j++) {
+            char *component_name_start = NULL;
+            char *component_name_end = NULL;
+            uint8_t component_name_length = 0;
+
+            while ((temp = strstr(temp, TEMPLATE_ID_START)) != NULL) {
+                temp += strlen(TEMPLATE_ID_START);
+
+                component_name_start = temp;
+                component_name_end = strchr(component_name_start, '"');
+                if (component_name_end == NULL) {
+                    fprintf(stderr, "Component import name for %s block is missing closing \".\nError code: %d\n", templates[i]->name, errno);
+                    retval = -1;
+                    goto main_cleanup_templates;
+                }
+
+                component_name_length = component_name_end - component_name_start;
+
+                break; /** Stop at the first occurrence */
+            }
+
+            uint8_t k;
+            for (k = 0; k < number_of_blocks; k++) {
+                if (strncmp(templates[k]->name, component_name_start, component_name_length) == 0) {
+                    template->components[j].component = templates[k];
+
+                    uint8_t id_length = (uint8_t)strlen(TEMPLATE_ID_START) + component_name_length + (uint8_t)strlen(TEMPLATE_ID_END);
+
+                    template->components[j].lookup.reference = calloc(id_length + 1, sizeof(char));
+                    if (template->components[j].lookup.reference == NULL) {
+                        fprintf(stderr, "Failed to allocate memory for template->components[%d].lookup.reference\nError code: %d\n", j, errno);
+                        retval = -1;
+                        goto main_cleanup_templates;
+                    }
+
+                    if (MAX_ID_LENGTH < id_length) {
+                        fprintf(stderr, "id_length(%d) should not exceed MAX_ID_LENGTH(%d), you might want to increase MAX_ID_LENGTH\nError code: %d\n", id_length, MAX_ID_LENGTH, errno);
+                        retval = -1;
+                        goto main_cleanup_templates;
+                    }
+
+                    char id[MAX_ID_LENGTH];
+
+                    if (sprintf(id, "%s%s%s", TEMPLATE_ID_START, component_name_start, TEMPLATE_ID_END) != (strlen(TEMPLATE_ID_START) + strlen(component_name_start) + strlen(TEMPLATE_ID_END))) {
+                        fprintf(stderr, "Failed to copy into id\nError code: %d\n", errno);
+                        retval = -1;
+                        goto main_cleanup_templates;
+                    }
+
+                    if (memcpy(template->components[j].lookup.reference, id, id_length) == NULL) {
+                        fprintf(stderr, "Failed to copy into template->components[%d].lookup.reference\nError code: %d\n", j, errno);
+                        retval = -1;
+                        goto main_cleanup_templates;
+                    }
+
+                    template->components[j].lookup.reference[id_length] = '\0';
+                }
+            }
+        }
+
+        temp = NULL;
     }
 
-    for (i = 0; i < MAX_TEMPLATES; i++) {
+    /* ⬇⬇ Render HTML blocks with imported components for each 'Template' instance ⬇⬇ */
+
+    for (i = 0; i < number_of_blocks; i++) {
         Template *template = templates[i];
 
         if (template->composed_html_content == NULL) {
             template->composed_html_content = (char *)calloc(template->html_content_length, sizeof(char));
             if (template->composed_html_content == NULL) {
-                sprintf(error.message, "Failed to allocate memory for template->composed_html_content. Error code: %d", errno);
+                fprintf(stderr, "Failed to allocate memory for template->composed_html_content\nError code: %d\n", errno);
                 retval = -1;
                 goto main_cleanup_templates;
             }
 
             if (memcpy(template->composed_html_content, template->html_content, (template->html_content_length - 1)) == NULL) {
-                sprintf(error.message, "Failed to copy into template->composed_html_content. Error code: %d", errno);
+                fprintf(stderr, "Failed to copy into template->composed_html_content\nError code: %d\n", errno);
                 retval = -1;
                 goto main_cleanup_templates;
             }
 
             template->composed_html_content[template->html_content_length - 1] = '\0';
+        }
+
+        if (template->components_length == 0) {
+            continue;
         }
 
         if ((error = resolve_component_imports(template)).panic) {
@@ -561,34 +695,58 @@ main_cleanup_socket:
     close(server_socket);
 
 main_cleanup_templates:
-    for (i = 0; i < MAX_ALL_TEMPLATES; i++) {
-        Template *template = all_templates[i];
+    free_all_templates(templates, number_of_blocks);
 
-        uint8_t j;
-        for (j = 0; j < template->blocks_length; j++) {
-            free(template->blocks[j].html.content);
-            template->blocks[j].html.content = NULL;
-
-            free(template->blocks[j].lookup.reference);
-            template->blocks[j].lookup.reference = NULL;
-        }
-
-        for (j = 0; j < template->components_length; j++) {
-            free(template->components[j].lookup.reference);
-            template->components[j].lookup.reference = NULL;
-        }
-
-        free(template->composed_html_content);
-        template->composed_html_content = NULL;
-
-        free(template->html_content);
-        template->html_content = NULL;
-    }
+main_cleanup_templates_collection:
+    free(templates_collection);
+    templates_collection = NULL;
 
 main_exit:
     printf("%s\n", error.message);
 
     return retval;
+}
+
+void free_all_templates(Template **templates, uint8_t number_of_blocks) {
+    uint8_t i;
+    for (i = 0; i < number_of_blocks; i++) {
+        free(templates[i]->name);
+        templates[i]->name = NULL;
+
+        free(templates[i]->composed_html_content);
+        templates[i]->composed_html_content = NULL;
+
+        free(templates[i]->html_content);
+        templates[i]->html_content = NULL;
+
+        uint8_t j;
+        for (j = 0; j < templates[i]->blocks_length; j++) {
+            /** TODO: Free templates[i]->blocks[j] members */
+        }
+
+        free(templates[i]->blocks);
+        templates[i]->blocks = NULL;
+
+        for (j = 0; j < templates[i]->components_length; j++) {
+            /** TODO: Free templates[i]->components[j] members */
+        }
+
+        free(templates[i]->components);
+        templates[i]->components = NULL;
+
+        for (j = 0; j < templates[i]->values_length; j++) {
+            /** TODO: Free templates[i]->values[j] members */
+        }
+
+        free(templates[i]->values);
+        templates[i]->values = NULL;
+
+        free(templates[i]);
+        templates[i] = NULL;
+    }
+
+    free(templates);
+    templates = NULL;
 }
 
 void *thread_function(void *arg) {
@@ -644,41 +802,6 @@ out:
     return NULL;
 }
 
-Error resolve_component_lookups(Template *template) {
-    Error error = {0};
-
-    uint8_t z;
-    for (z = 0; z < template->components_length; z++) {
-        Component *component = &(template->components[z]);
-        size_t component_lookup_reference_length = (component->lookup.end - component->lookup.start) + 1;
-
-        component->lookup.reference = (char *)calloc(component_lookup_reference_length, sizeof(char));
-        if (component->lookup.reference == NULL) {
-            sprintf(error.message, "Failed to allocate memory for component->lookup.reference. Error code: %d", errno);
-            error.panic = 1;
-            return error;
-        }
-
-        if (memcpy(component->lookup.reference, template->html_content + component->lookup.start, (component_lookup_reference_length - 1)) == NULL) {
-            sprintf(error.message, "Failed to copy into component->lookup.reference. Error code: %d", errno);
-            error.panic = 1;
-            return error;
-        }
-
-        component->lookup.reference[component_lookup_reference_length - 1] = '\0';
-
-        uint8_t next_length = component->component->components_length;
-        if (next_length > 0) {
-            if ((error = resolve_component_lookups(component->component)).panic) {
-                error.panic = 1;
-                return error;
-            }
-        }
-    }
-
-    return error;
-}
-
 Error resolve_component_imports(Template *template) {
     Error error = {0};
 
@@ -710,12 +833,12 @@ Error resolve_component_imports(Template *template) {
 
         char *after_address;
         if ((after_address = strstr(template->composed_html_content, component->lookup.reference)) == NULL) {
-            sprintf(error.message, "Failed to find component->lookup.reference into string. Error code: %d", errno);
-            error.panic = 1;
+            /** NOTE: did it not find it because it was already handled or because it didn't exist in the first place ??? */
+
             return error;
         }
 
-        size_t component_lookup_reference_length = component->lookup.end - component->lookup.start;
+        size_t component_lookup_reference_length = strlen(component->lookup.reference);
 
         size_t child_component_reference_start = after_address - template->composed_html_content;
         after_address += component_lookup_reference_length;
@@ -783,6 +906,16 @@ Error router(void *p_client_socket, uint8_t thread_index) {
     if (strcmp(parsed_http_request.url, "/") == 0) {
         if (strcmp(parsed_http_request.method, "GET") == 0) {
             error = home_get(client_socket, &parsed_http_request, thread_index);
+            goto router_cleanup_parsed_request;
+        }
+    } else if (strcmp(parsed_http_request.url, "/sign-up") == 0) {
+        if (strcmp(parsed_http_request.method, "GET") == 0) {
+            error = sign_up_get(client_socket, &parsed_http_request, thread_index);
+            goto router_cleanup_parsed_request;
+        }
+    } else if (strcmp(parsed_http_request.url, "/sign-up/create-user") == 0) {
+        if (strcmp(parsed_http_request.method, "POST") == 0) {
+            error = sign_up_create_user_post(client_socket, &parsed_http_request, thread_index);
             goto router_cleanup_parsed_request;
         }
     } else {
@@ -1031,6 +1164,49 @@ void http_request_free(HttpRequest *parsed_http_request) {
     parsed_http_request->headers = NULL;
 }
 
+Error sign_up_create_user_post(int client_socket, HttpRequest *request, uint8_t thread_index) {
+    Error error = {0};
+
+    url_decode(&request->body);
+
+    char email[255] = {0};
+    parse_value(email, "email", request->body);
+
+    char password[255] = {0};
+    parse_value(password, "password", request->body);
+
+    char repeat_password[255] = {0};
+    parse_value(repeat_password, "repeat_password", request->body);
+
+    char response[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+
+    if (send(client_socket, response, strlen(response), 0) == -1) {
+        sprintf(error.message, "Failed send HTTP response. Error code: %d", errno);
+        error.panic = PANIC;
+        close(client_socket);
+        return error;
+    }
+
+    close(client_socket);
+    return error;
+}
+
+Error sign_up_get(int client_socket, HttpRequest *request, uint8_t thread_index) {
+    Error error = {0};
+
+    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+
+    if (send(client_socket, response_headers, strlen(response_headers), 0) == -1) {
+        sprintf(error.message, "Failed send HTTP response. Error code: %d", errno);
+        error.panic = PANIC;
+        close(client_socket);
+        return error;
+    }
+
+    close(client_socket);
+    return error;
+}
+
 Error home_get(int client_socket, HttpRequest *request, uint8_t thread_index) {
     Error error = {0};
 
@@ -1051,26 +1227,12 @@ Error home_get(int client_socket, HttpRequest *request, uint8_t thread_index) {
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
 
-    size_t response_length = strlen(response_headers) + strlen(templates[1]->composed_html_content) + 1;
-    char *response = (char *)calloc(response_length, sizeof(char));
-
-    if (sprintf(response, "%s%s", response_headers, templates[1]->composed_html_content) < 0) {
-        sprintf(error.message, "Failed to copy response headers and template into response buffer. Error code: %d", errno);
-        error.panic = PANIC;
-        return error;
-    }
-
-    response[response_length - 1] = '\0';
-
-    if (send(client_socket, response, response_length - 1, 0) == -1) {
+    if (send(client_socket, response_headers, strlen(response_headers), 0) == -1) {
         sprintf(error.message, "Failed send HTTP response. Error code: %d", errno);
         error.panic = PANIC;
         close(client_socket);
         return error;
     }
-
-    free(response);
-    response = NULL;
 
     close(client_socket);
     return error;
@@ -1091,6 +1253,85 @@ Error not_found(int client_socket, HttpRequest *request) {
 
     close(client_socket);
     return error;
+}
+
+Error url_decode(char **string) {
+    Error error = {0};
+
+    char *out = *string;
+    size_t len = strlen(*string);
+
+    size_t i;
+    for (i = 0; i < len; i++) {
+        if ((*string)[i] == '%' && i + 2 < len && isxdigit((*string)[i + 1]) && isxdigit((*string)[i + 2])) {
+            char c = hex_to_char((*string)[i + 1]) * 16 + hex_to_char((*string)[i + 2]);
+            *out++ = c;
+            i += 2;
+        } else if ((*string)[i] == '+') {
+            *out++ = ' ';
+        } else {
+            *out++ = (*string)[i];
+        }
+    }
+
+    *out = '\0';
+
+    return error;
+}
+
+Error parse_value(char buffer[], const char key_name[], char *string) {
+    Error error = {0};
+
+    /** To avoid modifying the original string pointer, create a new one that can be freely modified */
+    char *key = string;
+
+    while (*key != '\0') {
+        char *key_end = strchr(key, '=');
+        size_t key_length = key_end - key;
+
+        char *value_start = key_end + 1;
+        char *value_end = strchr(value_start, '&');
+        if (value_end == NULL) {
+            value_end = strchr(value_start, '\0');
+        }
+
+        size_t value_length = value_end - value_start;
+
+        if (strncmp(key, key_name, key_length) == 0) {
+            memcpy(buffer, value_start, value_length);
+            buffer[value_length] = '\0';
+        }
+
+        if (*value_end == '\0') {
+            break;
+        }
+
+        key = value_end + 1;
+    }
+
+    if (buffer == NULL) {
+        sprintf(error.message, "Value not found per key. Error code: %d", errno);
+        error.panic = PANIC;
+        return error;
+    }
+
+    return error;
+}
+
+char hex_to_char(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+
+    return -1;
 }
 
 /**
@@ -1165,6 +1406,95 @@ Error load_values_from_file(void *structure, const char *project_root_path, cons
     }
 
     fclose(file);
+    return error;
+}
+
+/** TODO: Check for all possible errors inside get_html_files_paths */
+Error get_html_files_paths(char **html_files_paths, const char *base_path, uint8_t level, uint8_t *total_html_files) {
+    Error error = {0};
+
+    DIR *dir = opendir(base_path);
+    if (dir == NULL) {
+        sprintf(error.message, "Failed to open directory %s. Error code: %d", base_path, errno);
+        error.panic = 1;
+        return error;
+    }
+
+    struct dirent *entry;
+    char path[MAX_PATH_LENGTH];
+    struct stat statbuf;
+    size_t entry_name_length;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+            sprintf(path, "%s/%s", base_path, entry->d_name);
+
+            if (stat(path, &statbuf) == 0 && S_ISDIR(statbuf.st_mode)) {
+                if ((error = get_html_files_paths(html_files_paths, path, level + 1, total_html_files)).panic) {
+                    error.panic = 1;
+                    return error;
+                }
+            } else {
+                entry_name_length = strlen(entry->d_name);
+                if (entry_name_length > 5 && strcmp(entry->d_name + entry_name_length - 5, ".html") == 0) {
+                    if (*total_html_files < MAX_HTML_FILES) {
+                        strcpy(html_files_paths[*total_html_files], path);
+                        (*total_html_files)++;
+                    } else {
+                        closedir(dir);
+                        sprintf(error.message, "MAX_HTML_FILES(%d) limit reached. Error code: %d", MAX_HTML_FILES, errno);
+                        error.panic = 1;
+                        return error;
+                    }
+                }
+            }
+        }
+    }
+
+    closedir(dir);
+    return error;
+}
+
+void free_html_files_paths(char **html_files_paths) {
+    uint8_t i;
+    for (i = 0; i < MAX_HTML_FILES; i++) {
+        memset(html_files_paths[i], 0, MAX_PATH_LENGTH);
+        free(html_files_paths[i]);
+        html_files_paths[i] = NULL;
+    }
+
+    free(html_files_paths);
+    html_files_paths = NULL;
+}
+
+Error calculate_file_size(long *file_size, char *absolute_file_path) {
+    Error error = {0};
+
+    FILE *file = fopen(absolute_file_path, "r");
+
+    if (file == NULL) {
+        sprintf(error.message, "Failed to open file. Error code: %d", errno);
+        error.panic = PANIC;
+        return error;
+    }
+
+    if (fseek(file, 0, SEEK_END) == -1) {
+        fclose(file);
+        sprintf(error.message, "Failed to move the 'file position indicator' to the end of the file. Error code: %d", errno);
+        error.panic = PANIC;
+        return error;
+    }
+
+    *file_size = ftell(file);
+    if (*file_size == -1) {
+        fclose(file);
+        sprintf(error.message, "Failed to determine the current 'file position indicator' of the file. Error code: %d", errno);
+        error.panic = PANIC;
+        return error;
+    }
+
+    rewind(file);
+    fclose(file);
+
     return error;
 }
 

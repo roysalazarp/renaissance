@@ -1,0 +1,55 @@
+{{ block "sign_up_page" }}
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;800&display=swap" rel="stylesheet" />
+        <link rel="stylesheet" href="src/web/static/globals.css" />
+        <script src="https://unpkg.com/htmx.org@1.9.10" integrity="sha384-D1Kt99CQMDuVetoL1lrYwg5t+9QdHe7NLX/SoJYkXDFfX37iInKRy5xLSi8nO7UC" crossorigin="anonymous"></script>
+        <title>Test</title>
+    </head>
+    <body>
+        {{ slot }}
+        <!-- -->
+        {{ for users_rows }}
+        <tr>
+            {{ for user_row_values }}
+            <td>{{ . }}</td>
+            {{ end }}
+        </tr>
+        {{ end }}
+    </body>
+</html>
+{{ end }}
+
+<!-- -->
+
+{{ block "sign_up_form" }}
+<div class="form-container">
+    {{ template "title" }}
+    <form hx-post="/sign-up/create-user" hx-swap="none">
+        <div class="form-input">
+            <label for="email">Email</label>
+            <input type="email" placeholder="Enter Email" name="email" required />
+        </div>
+        <div class="form-input">
+            <label for="password">Password</label>
+            <input type="password" placeholder="Enter Password" name="password" required />
+        </div>
+        <div class="form-input">
+            <label for="repeat_password">Repeat Password</label>
+            <input type="password" placeholder="Repeat Password" name="repeat_password" required />
+        </div>
+        <button type="submit">Sign Up</button>
+    </form>
+</div>
+{{ end }}
+
+<!-- -->
+
+{{ block "title" }}
+<h1>Signup</h1>
+{{ end }}
