@@ -1,0 +1,32 @@
+<x-component-def name="moo">
+    <div>
+        <div>moo's content</div>
+        <x-slot />
+        <div>
+            <span>some more text</span>
+        </div>
+        <x-slot />
+        <h5>some more text</h5>
+    </div>
+</x-component-def>
+
+<x-component-def name="foo">
+    <div>
+        <div>foo's content</div>
+        <x-component name="moo">
+            <x-template>woa!</x-template>
+        </x-component>
+        <x-slot />
+        <x-slot />
+    </div>
+</x-component-def>
+
+<x-component-def name="bar">
+    <div>
+        <div>bar's content</div>
+        <x-component name="foo">
+            <x-template>hello world!</x-template>
+            <x-template>boo!</x-template>
+        </x-component>
+    </div>
+</x-component-def>

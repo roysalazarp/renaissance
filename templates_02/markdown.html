@@ -1,0 +1,51 @@
+<x-component-def name="root_layout">
+    <!DOCTYPE html>
+    <html lang="en">
+        <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <link rel="preconnect" href="https://fonts.googleapis.com" />
+            <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+            <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;800&display=swap" rel="stylesheet" />
+            <link rel="stylesheet" href="src/web/static/globals.css" />
+            <script src="https://unpkg.com/htmx.org@1.9.10" integrity="sha384-D1Kt99CQMDuVetoL1lrYwg5t+9QdHe7NLX/SoJYkXDFfX37iInKRy5xLSi8nO7UC" crossorigin="anonymous"></script>
+            <title>Test</title>
+        </head>
+        <body>
+            <x-component name="sign_up_form">
+                <x-template>
+                    <x-component name="title">
+                        <x-template> Sign Up Page </x-template>
+                    </x-component>
+                </x-template>
+            </x-component>
+        </body>
+    </html>
+</x-component-def>
+
+<x-component-def name="sign_up_form">
+    <div class="form-container">
+        <x-slot />
+        <form hx-post="/sign-up/create-user" hx-swap="none">
+            <div class="form-input">
+                <label for="email">Email</label>
+                <input type="email" placeholder="Enter Email" name="email" required />
+            </div>
+            <div class="form-input">
+                <label for="password">Password</label>
+                <input type="password" placeholder="Enter Password" name="password" required />
+            </div>
+            <div class="form-input">
+                <label for="repeat_password">Repeat Password</label>
+                <input type="password" placeholder="Repeat Password" name="repeat_password" required />
+            </div>
+            <button type="submit">Sign Up</button>
+        </form>
+    </div>
+</x-component-def>
+
+<x-component-def name="title">
+    <h1>
+        <x-slot />
+    </h1>
+</x-component-def>
