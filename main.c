@@ -3,16 +3,21 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
-#include <libpq-fe.h>
+#include <fcntl.h>
 #include <linux/limits.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/mman.h>
+#include <sys/select.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #ifndef MAP_ANONYMOUS
@@ -22,10 +27,15 @@
 #define MAX_PATH_LENGTH 200
 #define MAX_HTML_FILES 20
 #define MAX_CONNECTIONS 100
-#define THREAD_POOL_SIZE 3
+#define THREAD_POOL_SIZE 1
 
 #define KB(value) ((value) * 1024)
 #define PAGE_SIZE KB(4)
+
+#define MAX_EVENTS 10
+
+#define BLOCK_EXECUTION -1
+#define DONT_BLOCK_EXECUTION -1
 
 #define COMPONENT_DEFINITION_OPENING_TAG__START "<x-component-def name=\""
 #define COMPONENT_DEFINITION_OPENING_TAG__END "\">"
@@ -55,6 +65,11 @@ typedef struct {
 } RequestValue;
 
 typedef struct {
+    uint8_t *start_addr;
+    uint8_t *end_addr;
+} MemBlock;
+
+typedef struct {
     char *start_addr;
     char *end_addr;
 } StringsBlock;
@@ -70,6 +85,8 @@ typedef struct {
 
 typedef struct {
     Arena *arena;
+    MemBlock connection_msg;
+    StringsBlock queries;
     StringsBlock request;
 } ThreadData;
 
@@ -83,7 +100,6 @@ void sign_up_get(int client_socket);
 void styles_get(int client_socket);
 void home_get(int client_socket);
 void not_found(int client_socket);
-void print_query_result(PGresult *query_result);
 void locate_html_files(char *buffer, const char *base_path, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
 void url_decode(char **string);
 char hex_to_char(char c);
@@ -98,8 +114,6 @@ RequestValue find_http_request_value(const char key[], char *request);
 
 volatile sig_atomic_t keep_running = 1;
 
-__thread PGconn *gp_conn;
-
 pthread_t thread_pool[THREAD_POOL_SIZE];
 pthread_mutex_t thread_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t thread_condition_var = PTHREAD_COND_INITIALIZER;
@@ -109,6 +123,12 @@ GlobalData *gp_data;
 
 __thread Arena *gp_scratch_arena;
 __thread ThreadData *gp_thread_data;
+
+__thread int epoll_fd;
+__thread int postgres_socket;
+__thread int nfds;
+__thread struct epoll_event events[MAX_EVENTS];
+__thread struct epoll_event event;
 
 ClientSocketQueueNode *head_client_socket_queue = NULL;
 ClientSocketQueueNode *tail_client_socket_queue = NULL;
@@ -645,6 +665,60 @@ main_cleanup:
     return retval;
 }
 
+uint16_t string_to_uint16(const char *str) {
+    char *endptr;
+    errno = 0;
+    unsigned long ul = strtoul(str, &endptr, 10);
+
+    if (errno != 0) {
+        perror("strtoul");
+        return 0;
+    }
+
+    if (*endptr != '\0') {
+        fprintf(stderr, "Trailing characters after number: %s\n", endptr);
+        return 0;
+    }
+
+    if (ul > UINT16_MAX) {
+        fprintf(stderr, "Value out of range for uint16_t\n");
+        return 0;
+    }
+
+    return (uint16_t)ul;
+}
+
+ssize_t read_n(int sockfd, void *buf, size_t len) {
+    size_t total = 0;
+    ssize_t n;
+    char *p = buf;
+    while (total < len) {
+        n = read(sockfd, p + total, len - total);
+        if (n == -1) {
+            return -1;
+        }
+        if (n == 0) {
+            break;
+        }
+        total += n;
+    }
+    return total;
+}
+
+ssize_t write_all(int sockfd, const void *buf, size_t len) {
+    size_t total = 0;
+    ssize_t n;
+    const char *p = buf;
+    while (total < len) {
+        n = write(sockfd, p + total, len - total);
+        if (n == -1) {
+            return -1;
+        }
+        total += n;
+    }
+    return total;
+}
+
 void *thread_function(void *arg) {
     gp_scratch_arena = arena_init(PAGE_SIZE * 10);
 
@@ -657,17 +731,133 @@ void *thread_function(void *arg) {
 
     GlobalData *p_data = gp_data;
 
-    const char *db_connection_keywords[] = {"dbname", "user", "password", "host", "port", NULL};
-    const char *db_connection_values[6];
-    db_connection_values[0] = get_value("DB_NAME", p_data->env);
-    db_connection_values[1] = get_value("DB_USER", p_data->env);
-    db_connection_values[2] = get_value("DB_PASSWORD", p_data->env);
-    db_connection_values[3] = get_value("DB_HOST", p_data->env);
-    db_connection_values[4] = get_value("DB_PORT", p_data->env);
-    db_connection_values[5] = NULL;
+    postgres_socket = socket(AF_INET, SOCK_STREAM, 0);
+    assert(postgres_socket != -1);
 
-    gp_conn = PQconnectdbParams(db_connection_keywords, db_connection_values, 0);
-    assert(PQstatus(gp_conn) == CONNECTION_OK);
+    int enable = 1;
+    assert(setsockopt(postgres_socket, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(int)) != -1);
+
+    assert(fcntl(postgres_socket, F_SETFL, O_NONBLOCK) != -1);
+
+    struct sockaddr_in postgres_addr;
+    postgres_addr.sin_family = AF_INET;
+    postgres_addr.sin_port = htons(string_to_uint16(get_value("DB_PORT", p_data->env)));
+
+    memset(&postgres_addr.sin_zero, 0, sizeof(postgres_addr.sin_zero));
+    assert(inet_pton(AF_INET, get_value("DB_HOST", p_data->env), &postgres_addr.sin_addr) > 0);
+
+    if (connect(postgres_socket, (struct sockaddr *)&postgres_addr, sizeof(postgres_addr)) < 0) {
+        assert(errno == EINPROGRESS);
+    }
+
+    epoll_fd = epoll_create1(0);
+    event.events = EPOLLOUT | EPOLLET;
+    event.data.fd = postgres_socket;
+    assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, postgres_socket, &event) >= 0);
+
+    while (1) {
+        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, DONT_BLOCK_EXECUTION);
+        assert(nfds != -1);
+
+        /** We are only waiting to be notify that the socket is ready for write */
+        if (nfds) {
+            assert(events[0].events & EPOLLOUT);
+
+            break;
+        }
+    }
+
+    uint8_t *connection_msg = (u_int8_t *)p_scratch_arena->current;
+    p_thread_data->connection_msg.start_addr = p_scratch_arena->current;
+    uint8_t *tmp_connection_msg = connection_msg;
+
+    tmp_connection_msg += sizeof(u_int32_t); /** Just make room for msg_length */
+
+    u_int32_t protocol_version = htonl(0x00030000);
+    memcpy(tmp_connection_msg, &protocol_version, sizeof(protocol_version));
+    tmp_connection_msg += sizeof(protocol_version);
+
+    memcpy(tmp_connection_msg, "user", sizeof("user"));
+    tmp_connection_msg += sizeof("user");
+
+    char *user = get_value("DB_USER", p_data->env);
+    memcpy(tmp_connection_msg, user, strlen(user));
+    tmp_connection_msg += strlen(user);
+    *tmp_connection_msg = '\0';
+    tmp_connection_msg++;
+
+    memcpy(tmp_connection_msg, "database", sizeof("database"));
+    tmp_connection_msg += sizeof("database");
+
+    char *database = get_value("DB_NAME", p_data->env);
+    memcpy(tmp_connection_msg, database, strlen(database));
+    tmp_connection_msg += strlen(database);
+    *tmp_connection_msg = '\0';
+    tmp_connection_msg++;
+
+    *tmp_connection_msg = '\0';
+    tmp_connection_msg++;
+
+    size_t lennn = tmp_connection_msg - connection_msg;
+    u_int32_t msg_length = htonl((u_int32_t)lennn);
+    memcpy(connection_msg, &msg_length, sizeof(msg_length));
+
+    assert(send(postgres_socket, connection_msg, lennn, 0) > 0);
+
+    event.events = EPOLLIN | EPOLLET;
+    assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, postgres_socket, &event) >= 0);
+
+    while (1) {
+        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, DONT_BLOCK_EXECUTION);
+        assert(nfds != -1);
+
+        /** We are only waiting to be notify that the socket is ready for read */
+        if (nfds) {
+            assert(events[0].events & EPOLLIN);
+
+            break;
+        }
+    }
+
+    ssize_t response_buffer_size = KB(2);
+    char response[KB(2)];
+
+    memset(response, 0, response_buffer_size);
+
+    char *tmp_response = response;
+    ssize_t read_stream = 0;
+
+    while (1) {
+        char *advanced_request_ptr = tmp_response + read_stream;
+
+        ssize_t incomming_stream_size = recv(postgres_socket, advanced_request_ptr, response_buffer_size - read_stream, 0);
+        if (incomming_stream_size == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+        }
+
+        if (incomming_stream_size == 0) {
+            printf("Postgres server closed connection\n");
+
+            break;
+        }
+
+        read_stream += incomming_stream_size;
+
+        if (incomming_stream_size <= 0) {
+            break;
+        }
+
+        assert(read_stream < response_buffer_size);
+    }
+
+    ssize_t j;
+    for (j = 0; j < read_stream; j++) {
+        printf("%c", (unsigned char)response[j]);
+    }
+
+    printf("\n");
 
     uint8_t *p_thread_index = (uint8_t *)arg;
     pthread_t tid = pthread_self();
@@ -713,8 +903,6 @@ out:
     p_thread_index = NULL;
 
     arena_free(gp_scratch_arena);
-
-    PQfinish(gp_conn);
 
     return NULL;
 }
@@ -1006,26 +1194,115 @@ void styles_get(int client_socket) {
 }
 
 void home_get(int client_socket) {
-    PGconn *p_conn = gp_conn;
-
-    const char query[] = "SELECT u.id, u.email, c.nicename AS country, CONCAT(ui.first_name, ' ', ui.last_name) AS full_name FROM app.users u JOIN app.users_info ui ON u.id = ui.user_id JOIN app.countries c ON ui.country_id = c.id";
-    PGresult *users_result = PQexec(p_conn, query);
-
-    if (PQresultStatus(users_result) != PGRES_TUPLES_OK) {
-        /** TODO: Write error to logs */
-        /** TODO: Try to return error html to client */
-    }
-
-    print_query_result(users_result);
-
-    PQclear(users_result);
+    int i;
 
     Arena *p_scratch_arena = gp_scratch_arena;
+    ThreadData *p_thread_data = gp_thread_data;
 
-    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+    char *queries = (char *)p_scratch_arena->current;
+    p_thread_data->queries.start_addr = p_scratch_arena->current;
+    char *next_query = queries;
+
+    char query01[] = "SELECT version();";
+    size_t query01_length = sizeof(query01);
+
+    next_query[0] = 'Q';
+    next_query++;
+
+    *((int32_t *)next_query) = htonl((int32_t)query01_length);
+    next_query += sizeof(int32_t);
+
+    memcpy(next_query, query01, query01_length);
+    next_query += query01_length;
+
+    char query02[] = "SELECT version();";
+    size_t query02_length = sizeof(query02);
+
+    next_query[0] = 'Q';
+    next_query++;
+
+    *((int32_t *)next_query) = (int32_t)query02_length;
+    next_query += sizeof(int32_t);
+
+    memcpy(next_query, query02, query02_length);
+    next_query += query02_length;
+
+    p_thread_data->queries.end_addr = next_query;
+
+    next_query = queries;
+
+    event.events = EPOLLOUT | EPOLLIN | EPOLLET;
+    assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, postgres_socket, &event) >= 0);
+
+    while (1) {
+        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, DONT_BLOCK_EXECUTION);
+        assert(nfds != -1);
+
+        if (nfds) {
+            if (events[0].events & EPOLLOUT) {
+                while (next_query < p_thread_data->queries.end_addr) {
+                    void *msg = next_query;
+
+                    int32_t query_length = *((int32_t *)((char *)msg + 1));
+
+                    uint8_t *tmp = msg;
+                    tmp += 1;
+                    tmp += sizeof(int32_t);
+                    tmp += ntohl(query_length);
+
+                    size_t msg_length = tmp - (uint8_t *)msg;
+
+                    ssize_t bytes_sent = send(postgres_socket, msg, msg_length, 0);
+
+                    if (bytes_sent == -1 && errno == EAGAIN) {
+                        /* If send buffer is full, try again later */
+                        continue;
+                    }
+
+                    next_query += msg_length;
+                }
+            }
+
+            if (events[0].events & EPOLLIN) {
+                char buffer[4096];
+                int bytes_received = recv(postgres_socket, buffer, sizeof(buffer), 0);
+                if (bytes_received > 0) {
+                    /* Process the PostgreSQL response */
+                    printf("Received response: %s\n", buffer);
+                } else if (bytes_received == 0) {
+                    /* Connection closed by the server */
+                    printf("Connection closed by the server\n");
+                }
+            }
+        }
+    }
+
+    /* Switch to monitoring for readability (waiting for the response) */
+    event.events = EPOLLIN | EPOLLET;
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, postgres_socket, &event);
+
+    while (1) {
+        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, DONT_BLOCK_EXECUTION);
+        assert(nfds != -1);
+
+        if (nfds) {
+            assert(events[0].events & EPOLLIN);
+
+            char buffer[4096];
+            int bytes_received = recv(postgres_socket, buffer, sizeof(buffer), 0);
+            if (bytes_received > 0) {
+                /* Process the PostgreSQL response */
+                printf("Received response: %s\n", buffer);
+            } else if (bytes_received == 0) {
+                /* Connection closed by the server */
+                printf("Connection closed by the server\n");
+            }
+        }
+    }
 
     GlobalData *p_data = gp_data;
 
+    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
     char *template = get_value("home", p_data->html_templates);
 
     size_t response_length = strlen(response_headers) + strlen(template);
@@ -1293,38 +1570,6 @@ char *get_value(const char key[], StringsBlock block) {
     }
 
     assert(0);
-}
-
-void print_query_result(PGresult *query_result) {
-    const int num_columns = PQnfields(query_result);
-    const int num_rows = PQntuples(query_result);
-
-    int col = 0;
-    int row = 0;
-    int i = 0;
-
-    for (col = 0; col < num_columns; col++) {
-        printf("| %-48s ", PQfname(query_result, col));
-    }
-    printf("|\n");
-
-    printf("|");
-    for (col = 0; col < num_columns; col++) {
-        for (i = 0; i < 50; i++) {
-            printf("-");
-        }
-        printf("|");
-    }
-    printf("\n");
-
-    for (row = 0; row < num_rows; row++) {
-        for (col = 0; col < num_columns; col++) {
-            printf("| %-48s ", PQgetvalue(query_result, row, col));
-        }
-        printf("|\n");
-    }
-
-    printf("\n");
 }
 
 void enqueue_client_socket(int *client_socket) {
