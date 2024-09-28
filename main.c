@@ -734,8 +734,8 @@ void *thread_function(void *arg) {
     postgres_socket = socket(AF_INET, SOCK_STREAM, 0);
     assert(postgres_socket != -1);
 
-    int enable = 1;
-    assert(setsockopt(postgres_socket, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(int)) != -1);
+    int optname = 1;
+    assert(setsockopt(postgres_socket, SOL_SOCKET, SO_REUSEADDR, &optname, sizeof(int)) != -1);
 
     assert(fcntl(postgres_socket, F_SETFL, O_NONBLOCK) != -1);
 
@@ -862,6 +862,7 @@ void *thread_function(void *arg) {
     uint8_t *p_thread_index = (uint8_t *)arg;
     pthread_t tid = pthread_self();
     printf("(Thread %d) Setting up thread %lu\n", *p_thread_index, tid);
+    printf("\n\n");
 
     while (1) {
         int *p_client_socket;
@@ -940,6 +941,13 @@ void router(void *p_client_socket) {
         ssize_t incomming_stream_size = recv(client_socket, advanced_request_ptr, buffer_size - read_stream, 0);
         assert(incomming_stream_size != -1);
 
+        if (incomming_stream_size <= 0) {
+            /** TODOIMPORTANT: Make client_socket non-blocking, otherwise it will block when client request contains 0 bytes */
+            printf("fd %d - Empty request\n", client_socket);
+            goto router_cleanup;
+            break;
+        }
+
         read_stream += incomming_stream_size;
 
         if (does_http_request_contain_body == -1) {
@@ -1004,10 +1012,6 @@ void router(void *p_client_socket) {
             }
         }
 
-        if (incomming_stream_size <= 0) {
-            break;
-        }
-
         if (read_stream >= buffer_size) {
             buffer_size += KB(2);
         }
@@ -1022,11 +1026,13 @@ void router(void *p_client_socket) {
 
     RequestValue url = find_http_request_value("URL", p_thread_data->request.start_addr);
 
+    printf("%.*s\n", (int)url.length, url.start_addr);
+
     if (strlen(p_thread_data->request.start_addr) == 0) {
         printf("Request is empty\n");
     } else if (strncmp(url.start_addr, "/styles.css", strlen("/styles.css")) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
         styles_get(client_socket);
-    } else if (strncmp(url.start_addr, "/", strlen("/")) == 0) {
+    } else if (strncmp(url.start_addr, "/ ", strlen("/ ")) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
             home_get(client_socket);
         }
@@ -1042,6 +1048,7 @@ void router(void *p_client_socket) {
         not_found(client_socket);
     }
 
+router_cleanup:
     arena_reset(p_scratch_arena, sizeof(Arena) + sizeof(ThreadData));
 }
 
@@ -1203,101 +1210,92 @@ void home_get(int client_socket) {
     p_thread_data->queries.start_addr = p_scratch_arena->current;
     char *next_query = queries;
 
-    char query01[] = "SELECT version();";
+    uint8_t queries_count = 0;
+
+    char query01[] = "SELECT id FROM app.users;";
     size_t query01_length = sizeof(query01);
 
     next_query[0] = 'Q';
     next_query++;
 
-    *((int32_t *)next_query) = htonl((int32_t)query01_length);
+    *((int32_t *)next_query) = htonl((int32_t)query01_length + (int32_t)sizeof(int32_t));
     next_query += sizeof(int32_t);
 
     memcpy(next_query, query01, query01_length);
     next_query += query01_length;
 
-    char query02[] = "SELECT version();";
+    queries_count++;
+
+    char query02[] = "SELECT email FROM app.users;";
     size_t query02_length = sizeof(query02);
 
     next_query[0] = 'Q';
     next_query++;
 
-    *((int32_t *)next_query) = (int32_t)query02_length;
+    *((int32_t *)next_query) = htonl((int32_t)query02_length + (int32_t)sizeof(int32_t));
     next_query += sizeof(int32_t);
 
     memcpy(next_query, query02, query02_length);
     next_query += query02_length;
 
+    queries_count++;
+
     p_thread_data->queries.end_addr = next_query;
 
     next_query = queries;
 
-    event.events = EPOLLOUT | EPOLLIN | EPOLLET;
+    event.events = EPOLLOUT | EPOLLET;
     assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, postgres_socket, &event) >= 0);
 
-    while (1) {
-        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, DONT_BLOCK_EXECUTION);
-        assert(nfds != -1);
+    nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, BLOCK_EXECUTION);
+    assert(nfds != -1);
 
-        if (nfds) {
-            if (events[0].events & EPOLLOUT) {
-                while (next_query < p_thread_data->queries.end_addr) {
-                    void *msg = next_query;
+    assert(events[0].events & EPOLLOUT);
 
-                    int32_t query_length = *((int32_t *)((char *)msg + 1));
+    while (next_query < p_thread_data->queries.end_addr) {
+        void *msg = next_query;
 
-                    uint8_t *tmp = msg;
-                    tmp += 1;
-                    tmp += sizeof(int32_t);
-                    tmp += ntohl(query_length);
+        int32_t query_length = *((int32_t *)((char *)msg + 1));
 
-                    size_t msg_length = tmp - (uint8_t *)msg;
+        uint8_t *tmp = msg;
+        tmp += sizeof(char);
+        tmp += sizeof(int32_t);
+        tmp += strlen((char *)tmp) + 1;
 
-                    ssize_t bytes_sent = send(postgres_socket, msg, msg_length, 0);
+        size_t msg_length = tmp - (uint8_t *)msg;
 
-                    if (bytes_sent == -1 && errno == EAGAIN) {
-                        /* If send buffer is full, try again later */
-                        continue;
-                    }
+        ssize_t bytes_sent = send(postgres_socket, msg, msg_length, 0);
 
-                    next_query += msg_length;
-                }
-            }
-
-            if (events[0].events & EPOLLIN) {
-                char buffer[4096];
-                int bytes_received = recv(postgres_socket, buffer, sizeof(buffer), 0);
-                if (bytes_received > 0) {
-                    /* Process the PostgreSQL response */
-                    printf("Received response: %s\n", buffer);
-                } else if (bytes_received == 0) {
-                    /* Connection closed by the server */
-                    printf("Connection closed by the server\n");
-                }
-            }
+        if (bytes_sent == -1 && errno == EAGAIN) {
+            /* If send buffer is full, try again later */
+            continue;
         }
+
+        next_query += msg_length;
     }
 
-    /* Switch to monitoring for readability (waiting for the response) */
     event.events = EPOLLIN | EPOLLET;
     epoll_ctl(epoll_fd, EPOLL_CTL_MOD, postgres_socket, &event);
 
-    while (1) {
-        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, DONT_BLOCK_EXECUTION);
-        assert(nfds != -1);
+    uint8_t queries_responses_received = 0;
 
-        if (nfds) {
-            assert(events[0].events & EPOLLIN);
+    nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, BLOCK_EXECUTION);
+    assert(nfds != -1);
 
-            char buffer[4096];
-            int bytes_received = recv(postgres_socket, buffer, sizeof(buffer), 0);
-            if (bytes_received > 0) {
-                /* Process the PostgreSQL response */
-                printf("Received response: %s\n", buffer);
-            } else if (bytes_received == 0) {
-                /* Connection closed by the server */
-                printf("Connection closed by the server\n");
-            }
+    assert(events[0].events & EPOLLIN);
+
+    while (queries_responses_received < queries_count) {
+        char buffer[4096];
+        int bytes_received = recv(postgres_socket, buffer, sizeof(buffer), 0);
+        if (bytes_received > 0) {
+            /* Process the PostgreSQL response */
+            printf("Received response: %s\n", buffer);
+        } else if (bytes_received == 0) {
+            /* Connection closed by the server */
+            printf("Connection closed by the server\n");
         }
+
+        queries_responses_received++;
     }
 
     GlobalData *p_data = gp_data;
