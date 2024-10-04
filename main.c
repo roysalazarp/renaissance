@@ -6,7 +6,7 @@
 #include <fcntl.h>
 #include <linux/limits.h>
 #include <netinet/in.h>
-#include <pthread.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -26,16 +26,15 @@
 
 #define MAX_PATH_LENGTH 200
 #define MAX_HTML_FILES 20
-#define MAX_CONNECTIONS 100
-#define THREAD_POOL_SIZE 1
+#define MAX_CONNECTIONS 100    /** ?? */
+#define CONNECTION_POOL_SIZE 5 /** ?? */
 
 #define KB(value) ((value) * 1024)
 #define PAGE_SIZE KB(4)
 
-#define MAX_EVENTS 10
+#define MAX_EVENTS 10 /** ?? */
 
-#define BLOCK_EXECUTION -1
-#define DONT_BLOCK_EXECUTION -1
+#define BLOCK_EXECUTION -1 /* In the context of epoll this puts the process to sleep. */
 
 #define COMPONENT_DEFINITION_OPENING_TAG__START "<x-component-def name=\""
 #define COMPONENT_DEFINITION_OPENING_TAG__END "\">"
@@ -48,16 +47,18 @@
 #define TEMPLATE_CLOSING_TAG "</x-template>"
 #define SLOT_TAG "<x-slot />"
 
+typedef enum { SERVER_SOCKET, CLIENT_SOCKET, DB_SOCKET } FDType;
+
+typedef struct {
+    int fd;
+    FDType type;
+} SocketInfo;
+
 typedef struct {
     size_t size;
     void *start;
     void *current;
 } Arena;
-
-typedef struct ClientSocketQueueNode {
-    struct ClientSocketQueueNode *next;
-    int *client_socket;
-} ClientSocketQueueNode;
 
 typedef struct {
     char *start_addr;
@@ -72,33 +73,52 @@ typedef struct {
 typedef struct {
     char *start_addr;
     char *end_addr;
-} StringsBlock;
+} CharsBlock;
 
 typedef struct {
     Arena *arena;
-    StringsBlock env;
-    StringsBlock html_files_paths;
-    StringsBlock components;
-    StringsBlock html_templates;
-    char *styles;
-} GlobalData;
-
-typedef struct {
-    Arena *arena;
+    CharsBlock env;
+    CharsBlock html_files_paths;
+    CharsBlock components;
+    CharsBlock html_templates;
     MemBlock connection_msg;
-    StringsBlock queries;
-    StringsBlock request;
-} ThreadData;
+    char *styles;
+    SocketInfo *socket;
+} GlobalArenaDataLookup;
+
+typedef struct {
+    Arena *arena;
+    int client_socket;
+    CharsBlock request;
+    void *local;
+} ScratchArenaDataLookup;
+
+typedef struct {
+    int fd;
+    Arena *scratch_arena_raw;
+    ScratchArenaDataLookup *scratch_arena_data;
+    jmp_buf jmp_buf;
+} Client;
+
+typedef struct {
+    SocketInfo socket;
+    uint8_t index;
+    Client client;
+    uint8_t alive;
+} Connection;
+
+typedef struct {
+    MemBlock users_id_query;
+    MemBlock users_id_query_response;
+    CharsBlock http_response;
+} HomeGetContext;
 
 void sigint_handler(int signo);
-void router(void *p_client_socket);
-void *thread_function(void *arg);
-void enqueue_client_socket(int *client_socket);
-void *dequeue_client_socket();
+void router(Arena *scratch_arena_raw);
 void sign_up_create_user_post(int client_socket);
 void sign_up_get(int client_socket);
-void styles_get(int client_socket);
-void home_get(int client_socket);
+void styles_get(Arena *scratch_arena_raw);
+void home_get(Arena *scratch_arena_raw);
 void not_found(int client_socket);
 void locate_html_files(char *buffer, const char *base_path, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
 void url_decode(char **string);
@@ -109,48 +129,47 @@ void arena_free(Arena *arena);
 void arena_reset(Arena *arena, size_t arena_header_size);
 void read_file(char **buffer, long *file_size, char *absolute_file_path);
 void resolve_slots(char *component_markdown, char *import_statement, char **templates);
-char *get_value(const char key[], StringsBlock block);
+char *get_value(const char key[], CharsBlock block);
 RequestValue find_http_request_value(const char key[], char *request);
+uint16_t string_to_uint16(const char *str);
 
 volatile sig_atomic_t keep_running = 1;
 
-pthread_t thread_pool[THREAD_POOL_SIZE];
-pthread_mutex_t thread_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t thread_condition_var = PTHREAD_COND_INITIALIZER;
+Arena *_p_global_arena_raw;
+GlobalArenaDataLookup *_p_global_arena_data;
 
-Arena *gp_arena;
-GlobalData *gp_data;
+int epoll_fd;
+int nfds;
+struct epoll_event events[MAX_EVENTS];
+struct epoll_event event;
 
-__thread Arena *gp_scratch_arena;
-__thread ThreadData *gp_thread_data;
+#define to_index(i) (i + 1)
+#define from_index(i) (i - 1)
 
-__thread int epoll_fd;
-__thread int postgres_socket;
-__thread int nfds;
-__thread struct epoll_event events[MAX_EVENTS];
-__thread struct epoll_event event;
+Connection connection_pool[CONNECTION_POOL_SIZE];
 
-ClientSocketQueueNode *head_client_socket_queue = NULL;
-ClientSocketQueueNode *tail_client_socket_queue = NULL;
+jmp_buf ctx;
+
+int h_count;
 
 int main() {
     int retval = 0;
 
     uint8_t i;
 
-    gp_arena = arena_init(PAGE_SIZE * 20);
+    _p_global_arena_raw = arena_init(PAGE_SIZE * 20);
 
     /**
      * Store the pointer in a stack variable, as the
      * stack is more likely to remain in the L1 cache.
      */
-    Arena *p_arena = gp_arena;
+    Arena *p_global_arena_raw = _p_global_arena_raw;
 
-    /** For convenient access to all data stored in the global arena. */
-    gp_data = (GlobalData *)arena_alloc(p_arena, sizeof(GlobalData));
-    GlobalData *p_data = gp_data;
+    /** For convenient access to all data stored in the GlobalArenaDataLookup arena. */
+    _p_global_arena_data = (GlobalArenaDataLookup *)arena_alloc(p_global_arena_raw, sizeof(GlobalArenaDataLookup));
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
-    p_data->arena = p_arena;
+    p_global_arena_data->arena = p_global_arena_raw;
 
     /** The .env file stores all necessary environment variables. */
     char *env_file_content = NULL;
@@ -159,8 +178,8 @@ int main() {
 
     assert(file_size != 0);
 
-    char *env_vars = (char *)p_arena->current;
-    p_data->env.start_addr = p_arena->current;
+    char *env_vars = (char *)p_global_arena_raw->current;
+    p_global_arena_data->env.start_addr = p_global_arena_raw->current;
     char *tmp_env_vars = env_vars;
 
     char *env_file_line = env_file_content;
@@ -289,23 +308,23 @@ int main() {
         env_var_value_processed = 0;
     }
 
-    p_arena->current = tmp_env_vars + 1;
-    p_data->env.end_addr = (char *)p_arena->current - 1;
+    p_global_arena_raw->current = tmp_env_vars + 1;
+    p_global_arena_data->env.end_addr = (char *)p_global_arena_raw->current - 1;
 
     /* We respond to browser requests with HTML using a hypermedia approach. */
-    char *html_files_paths = (char *)p_arena->current;
-    p_data->html_files_paths.start_addr = p_arena->current;
-    char *base_path = get_value("TEMPLATES_FOLDER", p_data->env);
+    char *html_files_paths = (char *)p_global_arena_raw->current;
+    p_global_arena_data->html_files_paths.start_addr = p_global_arena_raw->current;
+    char *base_path = get_value("TEMPLATES_FOLDER", p_global_arena_data->env);
     uint8_t html_files_count = 0;
     size_t all_paths_length = 0;
     locate_html_files(html_files_paths, base_path, 0, &html_files_count, &all_paths_length);
 
-    p_arena->current = (char *)p_arena->current + all_paths_length;
-    p_data->html_files_paths.end_addr = (char *)p_arena->current - 1;
+    p_global_arena_raw->current = (char *)p_global_arena_raw->current + all_paths_length;
+    p_global_arena_data->html_files_paths.end_addr = (char *)p_global_arena_raw->current - 1;
 
     /* A Component is an HTML snippet that may include references to other HTML snippets, i.e., it is composable */
-    char *components = (char *)p_arena->current;
-    p_data->components.start_addr = p_arena->current;
+    char *components = (char *)p_global_arena_raw->current;
+    p_global_arena_data->components.start_addr = p_global_arena_raw->current;
     char *tmp_components = components;
 
     char *tmp_html_files_paths = html_files_paths;
@@ -428,12 +447,12 @@ int main() {
         i++;
     }
 
-    p_arena->current = tmp_components;
-    p_data->components.end_addr = (char *)p_arena->current - 1;
+    p_global_arena_raw->current = tmp_components;
+    p_global_arena_data->components.end_addr = (char *)p_global_arena_raw->current - 1;
 
     /* An HTML template is essentially a Component that has been compiled with all its imports. */
-    char *html_templates = (char *)p_arena->current;
-    p_data->html_templates.start_addr = p_arena->current;
+    char *html_templates = (char *)p_global_arena_raw->current;
+    p_global_arena_data->html_templates.start_addr = p_global_arena_raw->current;
 
     char *tmp_html_templates = html_templates;
 
@@ -549,17 +568,17 @@ int main() {
         tmp_html_templates += strlen(tmp_html_templates) + 1;
     }
 
-    p_arena->current = tmp_html_templates;
-    p_data->html_templates.end_addr = (char *)p_arena->current - 1;
+    p_global_arena_raw->current = tmp_html_templates;
+    p_global_arena_data->html_templates.end_addr = (char *)p_global_arena_raw->current - 1;
 
-    char *styles = (char *)p_arena->current;
-    p_data->styles = p_arena->current;
-    char *styles_filepath = "./templates/index.css";
+    char *styles = (char *)p_global_arena_raw->current;
+    p_global_arena_data->styles = p_global_arena_raw->current;
+    char *styles_filepath = "./templates/styles.css";
     char *styles_file_content = NULL;
     long styles_file_size = 0;
     read_file(&styles_file_content, &styles_file_size, styles_filepath); /** TODO: Minify CSS */
     memcpy(styles, styles_file_content, styles_file_size);
-    p_arena->current = styles + styles_file_size + 1;
+    p_global_arena_raw->current = styles + styles_file_size + 1;
     free(styles_file_content);
     styles_file_content = NULL;
 
@@ -569,13 +588,19 @@ int main() {
      */
     assert(signal(SIGINT, sigint_handler) != SIG_ERR);
 
+    epoll_fd = epoll_create1(0);
+    assert(epoll_fd != -1);
+
     uint16_t port = 8080;
 
-    int server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    assert(server_socket != -1);
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    assert(server_fd != -1);
 
-    int optname = 1;
-    assert(setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &optname, sizeof(int)) != -1);
+    int server_fd_flags = fcntl(server_fd, F_GETFL, 0);
+    assert(fcntl(server_fd, F_SETFL, server_fd_flags | O_NONBLOCK) != -1);
+
+    int server_fd_optname = 1;
+    assert(setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &server_fd_optname, sizeof(int)) != -1);
 
     /** Configure server address */
     struct sockaddr_in server_addr;
@@ -583,84 +608,252 @@ int main() {
     server_addr.sin_port = htons(port);       /** Convert the port number from host byte order to network byte order (big-endian) */
     server_addr.sin_addr.s_addr = INADDR_ANY; /** Listen on all available network interfaces (IPv4 addresses) */
 
-    assert(bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) != -1);
+    assert(bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) != -1);
 
-    assert(listen(server_socket, MAX_CONNECTIONS) != -1);
+    assert(listen(server_fd, MAX_CONNECTIONS) != -1);
+
+    SocketInfo *server_socket = arena_alloc(p_global_arena_raw, sizeof(SocketInfo));
+    server_socket->fd = server_fd;
+    server_socket->type = SERVER_SOCKET;
+
+    p_global_arena_data->socket = server_socket;
+
+    event.events = EPOLLIN;
+    event.data.ptr = server_socket;
+    assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) != -1);
 
     printf("Server listening on port: %d...\n", port);
 
-    /** Create thread pool */
-    for (i = 0; i < THREAD_POOL_SIZE; i++) {
-        /**
-         * Thread might take some time time to create, but 'i' will keep mutating as the program runs,
-         * storing the value of 'i' in the heap at the time of iterating ensures that thread_function
-         * receives the correct value even when 'i' has moved on.
-         */
-        unsigned short *p_iteration = malloc(sizeof(unsigned short));
-        *p_iteration = i;
-        assert(pthread_create(&thread_pool[*p_iteration], NULL, &thread_function, p_iteration) == 0);
-    }
+    for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
+        int db_fd = socket(AF_INET, SOCK_STREAM, 0);
+        assert(db_fd != -1);
 
-    while (1) {
-        struct sockaddr_in client_addr;
-        socklen_t client_addr_len = sizeof client_addr;
+        int db_fd_flags = fcntl(server_fd, F_GETFL, 0);
+        assert(fcntl(db_fd, F_SETFL, db_fd_flags | O_NONBLOCK) != -1);
 
-        /** The while loop will wait at accept for a new client to connect */
-        int client_socket;
-        client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_addr_len);
+        int db_fd_optname = 1;
+        assert(setsockopt(db_fd, SOL_SOCKET, SO_REUSEADDR, &db_fd_optname, sizeof(int)) != -1);
 
-        /**
-         * When a signal to exit the program is received, 'accept' will error with -1. To verify that
-         * client_socket being -1 isn't because of program termination, check whether the program
-         * has received a signal to exit.
-         */
-        if (keep_running == 0) {
-            /** Send signal to threads to resume execusion so they can proceed to cleanup */
-            pthread_cond_signal(&thread_condition_var);
-            retval = 0;
-            goto main_cleanup;
+        struct sockaddr_in db_addr;
+        db_addr.sin_family = AF_INET;
+        db_addr.sin_port = htons(string_to_uint16(get_value("DB_PORT", p_global_arena_data->env)));
+
+        memset(&db_addr.sin_zero, 0, sizeof(db_addr.sin_zero));
+        assert(inet_pton(AF_INET, get_value("DB_HOST", p_global_arena_data->env), &db_addr.sin_addr) > 0);
+
+        if (connect(db_fd, (struct sockaddr *)&db_addr, sizeof(db_addr)) < 0) {
+            assert(errno == EINPROGRESS);
         }
 
-        /** At this point, we know that client_socket being -1 wouldn't have been caused by program termination */
-        assert(client_socket != -1);
+        connection_pool[i].socket.fd = db_fd;
+        connection_pool[i].socket.type = DB_SOCKET;
+        connection_pool[i].index = i;
 
-        /**
-         * Store fd number for client socket in the heap so it can be pointed by a queue data structure
-         * and used when it is needed.
-         */
-        int *p_client_socket = malloc(sizeof(int));
-        assert(p_client_socket != NULL);
-
-        *p_client_socket = client_socket;
-
-        assert(pthread_mutex_lock(&thread_mutex) == 0);
-
-        printf("- New request: enqueue_client_socket client socket fd %d\n", *p_client_socket);
-        enqueue_client_socket(p_client_socket);
-
-        assert(pthread_cond_signal(&thread_condition_var) == 0);
-
-        assert(pthread_mutex_unlock(&thread_mutex) == 0);
+        event.events = EPOLLOUT | EPOLLET;
+        event.data.ptr = &(connection_pool[i]);
+        assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, connection_pool[i].socket.fd, &event) != -1);
     }
 
-main_cleanup:
-    for (i = 0; i < THREAD_POOL_SIZE; i++) {
-        /**
-         * At this point, the variable 'keep_running' is 0.
-         * Signal all threads to resume execution to perform cleanup.
-         */
-        pthread_cond_signal(&thread_condition_var);
+    uint8_t *connection_msg = (uint8_t *)p_global_arena_raw->current;
+    p_global_arena_data->connection_msg.start_addr = p_global_arena_raw->current;
+    uint8_t *tmp_connection_msg = connection_msg;
+
+    /** Leave space at the very beginning for msg_length */
+    tmp_connection_msg += sizeof(u_int32_t);
+
+    u_int32_t protocol_version = htonl(0x00030000); /** version 3.0 */
+    memcpy(tmp_connection_msg, &protocol_version, sizeof(protocol_version));
+    tmp_connection_msg += sizeof(protocol_version);
+
+    memcpy(tmp_connection_msg, "user", sizeof("user"));
+    tmp_connection_msg += sizeof("user");
+
+    char *user = get_value("DB_USER", p_global_arena_data->env);
+    memcpy(tmp_connection_msg, user, strlen(user));
+    tmp_connection_msg += strlen(user);
+    *tmp_connection_msg = '\0';
+    tmp_connection_msg++;
+
+    memcpy(tmp_connection_msg, "database", sizeof("database"));
+    tmp_connection_msg += sizeof("database");
+
+    char *database = get_value("DB_NAME", p_global_arena_data->env);
+    memcpy(tmp_connection_msg, database, strlen(database));
+    tmp_connection_msg += strlen(database);
+    *tmp_connection_msg = '\0';
+    tmp_connection_msg++;
+
+    *tmp_connection_msg = '\0';
+    tmp_connection_msg++;
+
+    size_t connection_msg_size = tmp_connection_msg - connection_msg;
+    u_int32_t msg_length = htonl((u_int32_t)connection_msg_size);
+    memcpy(connection_msg, &msg_length, sizeof(msg_length));
+
+    p_global_arena_raw->current = tmp_connection_msg;
+    p_global_arena_data->connection_msg.end_addr = (uint8_t *)p_global_arena_raw->current - 1;
+
+    int count = 0;
+    while (count < CONNECTION_POOL_SIZE) {
+        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, BLOCK_EXECUTION);
+        assert(nfds != -1);
+
+        for (i = 0; i < nfds; i++) {
+            SocketInfo *socket_info = (SocketInfo *)events[i].data.ptr;
+
+            if (socket_info->type == DB_SOCKET) {
+                if (events[i].events & EPOLLOUT) {
+                    ssize_t bytes_sent = send(socket_info->fd, connection_msg, connection_msg_size, 0);
+                    if (bytes_sent == -1 && errno == EAGAIN) {
+                        /* If send buffer is full, try again later */
+                        continue;
+                    }
+
+                    event.events = EPOLLIN | EPOLLET;
+                    event.data.ptr = socket_info;
+                    assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, socket_info->fd, &event) >= 0);
+                } else if (events[i].events & EPOLLIN) {
+                    char db_connection_response[KB(1)];
+                    memset(db_connection_response, 0, sizeof(db_connection_response));
+
+                    char *tmp_response = db_connection_response;
+                    ssize_t read_stream = 0;
+
+                    while (1) {
+                        char *ptr = tmp_response + read_stream;
+
+                        ssize_t incomming_stream_size = recv(socket_info->fd, ptr, sizeof(db_connection_response) - read_stream, 0);
+                        if (incomming_stream_size == -1) {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                break;
+                            }
+                        }
+
+                        if (incomming_stream_size == 0) {
+                            printf("Postgres server closed connection\n");
+
+                            break;
+                        }
+
+                        read_stream += incomming_stream_size;
+
+                        if (incomming_stream_size <= 0) {
+                            break;
+                        }
+
+                        assert(read_stream < (ssize_t)sizeof(db_connection_response));
+                    }
+
+                    if (read_stream > 0) {
+                        connection_pool[count].alive = 1;
+                        count++;
+                    }
+
+                    /** TODO: Instead of printing raw bytes, decode to data structure. */
+                    ssize_t j;
+                    for (j = 0; j < read_stream; j++) {
+                        printf("%c", (unsigned char)db_connection_response[j]);
+                        if (j == read_stream - 1) {
+                            printf("\n");
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    for (i = 0; i < THREAD_POOL_SIZE; i++) {
-        printf("(Thread %d) Cleaning up thread %lu\n", i, thread_pool[i]);
+    struct sockaddr_in client_addr; /** Why is this needed ?? */
+    socklen_t client_addr_len = sizeof(client_addr);
 
-        assert(pthread_join(thread_pool[i], NULL) == 0);
+    while (1) {
+        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, BLOCK_EXECUTION);
+        assert(nfds != -1);
+
+        for (i = 0; i < nfds; i++) {
+            SocketInfo *socket_info = (SocketInfo *)events[i].data.ptr;
+
+            switch (socket_info->type) {
+                case SERVER_SOCKET: {
+                    if (events[i].events & EPOLLIN) { /** Server received new client request */
+                        int client_fd = accept(socket_info->fd, (struct sockaddr *)&client_addr, &client_addr_len);
+                        assert(client_fd != -1);
+
+                        int client_fd_flags = fcntl(client_fd, F_GETFL, 0);
+                        assert(fcntl(client_fd, F_SETFL, client_fd_flags | O_NONBLOCK) != -1);
+
+                        printf("Initiated - client-fd: %d\n", client_fd);
+
+                        /** Allocate memory for handling client request */
+                        Arena *scratch_arena_raw = arena_init(PAGE_SIZE * 10);
+                        SocketInfo *client_socket_info = (SocketInfo *)arena_alloc(scratch_arena_raw, sizeof(SocketInfo));
+                        client_socket_info->fd = client_fd;
+                        client_socket_info->type = CLIENT_SOCKET;
+
+                        ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)arena_alloc(scratch_arena_raw, sizeof(ScratchArenaDataLookup));
+                        scratch_arena_data->arena = scratch_arena_raw;
+                        scratch_arena_data->client_socket = client_fd;
+
+                        event.events = EPOLLIN | EPOLLET;
+                        event.data.ptr = client_socket_info;
+                        assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) != -1);
+
+                        break;
+                    }
+
+                    printf("Server socket only should receive EPOLLIN events\n");
+                    assert(0);
+
+                    break;
+                }
+
+                case CLIENT_SOCKET: {
+                    if (events[i].events & EPOLLIN) {
+                        Arena *scratch_arena_raw = (Arena *)((uint8_t *)socket_info - sizeof(Arena));
+
+                        if (setjmp(ctx) == 0) {
+                            router(scratch_arena_raw);
+                        }
+
+                        break;
+                    }
+
+                    printf("Client socket only should receive EPOLLIN events\n");
+                    assert(0);
+
+                    break;
+                }
+
+                case DB_SOCKET: {
+                    if (events[i].events & EPOLLIN) { /** DB socket (aka connection) ready for read */
+                        Connection *db_socket = (Connection *)socket_info;
+
+                        /** The connection should belong to a client fd (aka request) */
+                        assert(db_socket->client.fd != 0);
+
+                        /** Go back to where you attempted to read the result of a
+                         * query but jumped out since we are not supposed to wait
+                         * for response to be ready. Pass index to restore request
+                         * state through connection pool */
+                        longjmp(db_socket->client.jmp_buf, to_index(db_socket->index));
+                    } else if (events[i].events & EPOLLOUT) { /** DB socket (aka connection) is ready for write */
+                        /** We don't do anything here since the connection pool
+                         * already only allow us to use free connections (aka db sockets ready for write) */
+                    }
+
+                    break;
+                }
+
+                default: {
+                    /* TODO */
+                    break;
+                }
+            }
+        }
     }
 
-    close(server_socket);
+    close(server_fd);
 
-    arena_free(gp_arena);
+    arena_free(_p_global_arena_raw);
 
     return retval;
 }
@@ -688,241 +881,17 @@ uint16_t string_to_uint16(const char *str) {
     return (uint16_t)ul;
 }
 
-ssize_t read_n(int sockfd, void *buf, size_t len) {
-    size_t total = 0;
-    ssize_t n;
-    char *p = buf;
-    while (total < len) {
-        n = read(sockfd, p + total, len - total);
-        if (n == -1) {
-            return -1;
-        }
-        if (n == 0) {
-            break;
-        }
-        total += n;
-    }
-    return total;
-}
+void router(Arena *scratch_arena_raw) {
+    int i;
 
-ssize_t write_all(int sockfd, const void *buf, size_t len) {
-    size_t total = 0;
-    ssize_t n;
-    const char *p = buf;
-    while (total < len) {
-        n = write(sockfd, p + total, len - total);
-        if (n == -1) {
-            return -1;
-        }
-        total += n;
-    }
-    return total;
-}
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
 
-void *thread_function(void *arg) {
-    gp_scratch_arena = arena_init(PAGE_SIZE * 10);
+    int client_socket = scratch_arena_data->client_socket;
 
-    Arena *p_scratch_arena = gp_scratch_arena;
+    printf("Handling - client-fd: %d\n", client_socket);
 
-    gp_thread_data = (ThreadData *)arena_alloc(p_scratch_arena, sizeof(ThreadData));
-    ThreadData *p_thread_data = gp_thread_data;
-
-    p_thread_data->arena = p_scratch_arena;
-
-    GlobalData *p_data = gp_data;
-
-    postgres_socket = socket(AF_INET, SOCK_STREAM, 0);
-    assert(postgres_socket != -1);
-
-    int optname = 1;
-    assert(setsockopt(postgres_socket, SOL_SOCKET, SO_REUSEADDR, &optname, sizeof(int)) != -1);
-
-    assert(fcntl(postgres_socket, F_SETFL, O_NONBLOCK) != -1);
-
-    struct sockaddr_in postgres_addr;
-    postgres_addr.sin_family = AF_INET;
-    postgres_addr.sin_port = htons(string_to_uint16(get_value("DB_PORT", p_data->env)));
-
-    memset(&postgres_addr.sin_zero, 0, sizeof(postgres_addr.sin_zero));
-    assert(inet_pton(AF_INET, get_value("DB_HOST", p_data->env), &postgres_addr.sin_addr) > 0);
-
-    if (connect(postgres_socket, (struct sockaddr *)&postgres_addr, sizeof(postgres_addr)) < 0) {
-        assert(errno == EINPROGRESS);
-    }
-
-    epoll_fd = epoll_create1(0);
-    event.events = EPOLLOUT | EPOLLET;
-    event.data.fd = postgres_socket;
-    assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, postgres_socket, &event) >= 0);
-
-    while (1) {
-        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, DONT_BLOCK_EXECUTION);
-        assert(nfds != -1);
-
-        /** We are only waiting to be notify that the socket is ready for write */
-        if (nfds) {
-            assert(events[0].events & EPOLLOUT);
-
-            break;
-        }
-    }
-
-    uint8_t *connection_msg = (u_int8_t *)p_scratch_arena->current;
-    p_thread_data->connection_msg.start_addr = p_scratch_arena->current;
-    uint8_t *tmp_connection_msg = connection_msg;
-
-    tmp_connection_msg += sizeof(u_int32_t); /** Just make room for msg_length */
-
-    u_int32_t protocol_version = htonl(0x00030000);
-    memcpy(tmp_connection_msg, &protocol_version, sizeof(protocol_version));
-    tmp_connection_msg += sizeof(protocol_version);
-
-    memcpy(tmp_connection_msg, "user", sizeof("user"));
-    tmp_connection_msg += sizeof("user");
-
-    char *user = get_value("DB_USER", p_data->env);
-    memcpy(tmp_connection_msg, user, strlen(user));
-    tmp_connection_msg += strlen(user);
-    *tmp_connection_msg = '\0';
-    tmp_connection_msg++;
-
-    memcpy(tmp_connection_msg, "database", sizeof("database"));
-    tmp_connection_msg += sizeof("database");
-
-    char *database = get_value("DB_NAME", p_data->env);
-    memcpy(tmp_connection_msg, database, strlen(database));
-    tmp_connection_msg += strlen(database);
-    *tmp_connection_msg = '\0';
-    tmp_connection_msg++;
-
-    *tmp_connection_msg = '\0';
-    tmp_connection_msg++;
-
-    size_t lennn = tmp_connection_msg - connection_msg;
-    u_int32_t msg_length = htonl((u_int32_t)lennn);
-    memcpy(connection_msg, &msg_length, sizeof(msg_length));
-
-    assert(send(postgres_socket, connection_msg, lennn, 0) > 0);
-
-    event.events = EPOLLIN | EPOLLET;
-    assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, postgres_socket, &event) >= 0);
-
-    while (1) {
-        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, DONT_BLOCK_EXECUTION);
-        assert(nfds != -1);
-
-        /** We are only waiting to be notify that the socket is ready for read */
-        if (nfds) {
-            assert(events[0].events & EPOLLIN);
-
-            break;
-        }
-    }
-
-    ssize_t response_buffer_size = KB(2);
-    char response[KB(2)];
-
-    memset(response, 0, response_buffer_size);
-
-    char *tmp_response = response;
-    ssize_t read_stream = 0;
-
-    while (1) {
-        char *advanced_request_ptr = tmp_response + read_stream;
-
-        ssize_t incomming_stream_size = recv(postgres_socket, advanced_request_ptr, response_buffer_size - read_stream, 0);
-        if (incomming_stream_size == -1) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break;
-            }
-        }
-
-        if (incomming_stream_size == 0) {
-            printf("Postgres server closed connection\n");
-
-            break;
-        }
-
-        read_stream += incomming_stream_size;
-
-        if (incomming_stream_size <= 0) {
-            break;
-        }
-
-        assert(read_stream < response_buffer_size);
-    }
-
-    ssize_t j;
-    for (j = 0; j < read_stream; j++) {
-        printf("%c", (unsigned char)response[j]);
-    }
-
-    printf("\n");
-
-    uint8_t *p_thread_index = (uint8_t *)arg;
-    pthread_t tid = pthread_self();
-    printf("(Thread %d) Setting up thread %lu\n", *p_thread_index, tid);
-    printf("\n\n");
-
-    while (1) {
-        int *p_client_socket;
-
-        if (pthread_mutex_lock(&thread_mutex) != 0) {
-            /** TODO: cleanup */
-        }
-
-        /** Check queue for client request */
-        if ((p_client_socket = dequeue_client_socket()) == NULL) {
-            /** At this point, we know the queue was empty, so hold thread execusion */
-            pthread_cond_wait(&thread_condition_var, &thread_mutex); /** On hold, waiting to receive a signal... */
-            /** Signal to proceed with execusion has been sent */
-
-            if (keep_running == 0) {
-                assert(pthread_mutex_unlock(&thread_mutex) == 0);
-                goto out;
-            }
-
-            p_client_socket = dequeue_client_socket();
-            printf("(Thread %d) Dequeueing(received signal)...\n", *p_thread_index);
-            goto skip_print;
-        }
-
-        printf("(Thread %d) Dequeueing...\n", *p_thread_index);
-
-    skip_print:
-        assert(pthread_mutex_unlock(&thread_mutex) == 0);
-
-        if (p_client_socket != NULL) {
-            router(p_client_socket);
-        }
-    }
-
-out:
-    printf("(Thread %d) Out of while loop\n", *p_thread_index);
-
-    free(p_thread_index);
-    p_thread_index = NULL;
-
-    arena_free(gp_scratch_arena);
-
-    return NULL;
-}
-
-void router(void *p_client_socket) {
-    /**
-     * At this point we don't need to hold the client_socket in heap anymore, we can work
-     * with it in the stack from now on
-     */
-    int client_socket = *((int *)p_client_socket);
-
-    free(p_client_socket);
-    p_client_socket = NULL;
-
-    Arena *p_scratch_arena = gp_scratch_arena;
-    ThreadData *p_thread_data = gp_thread_data;
-
-    char *request = (char *)p_scratch_arena->current;
-    p_thread_data->request.start_addr = p_scratch_arena->current;
+    char *request = (char *)scratch_arena_raw->current;
+    scratch_arena_data->request.start_addr = scratch_arena_raw->current;
 
     char *tmp_request = request;
 
@@ -939,13 +908,19 @@ void router(void *p_client_socket) {
         char *advanced_request_ptr = tmp_request + read_stream;
 
         ssize_t incomming_stream_size = recv(client_socket, advanced_request_ptr, buffer_size - read_stream, 0);
-        assert(incomming_stream_size != -1);
+        if (incomming_stream_size == -1) {
+            printf("Error: %s\n", strerror(errno));
+
+            assert(0);
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            }
+        }
 
         if (incomming_stream_size <= 0) {
-            /** TODOIMPORTANT: Make client_socket non-blocking, otherwise it will block when client request contains 0 bytes */
+            /** FIX IMPORTANT: Make client_socket non-blocking, otherwise it will block when client request contains 0 bytes */
             printf("fd %d - Empty request\n", client_socket);
-            goto router_cleanup;
-            break;
+            return;
         }
 
         read_stream += incomming_stream_size;
@@ -1021,20 +996,21 @@ void router(void *p_client_socket) {
     (*tmp_request) = '\0';
     tmp_request++;
 
-    p_scratch_arena->current = tmp_request;
-    p_thread_data->request.end_addr = (char *)p_scratch_arena->current - 1;
+    scratch_arena_raw->current = tmp_request;
+    scratch_arena_data->request.end_addr = (char *)scratch_arena_raw->current - 1;
 
-    RequestValue url = find_http_request_value("URL", p_thread_data->request.start_addr);
+    RequestValue url = find_http_request_value("URL", scratch_arena_data->request.start_addr);
 
-    printf("%.*s\n", (int)url.length, url.start_addr);
-
-    if (strlen(p_thread_data->request.start_addr) == 0) {
+    if (strlen(scratch_arena_data->request.start_addr) == 0) {
         printf("Request is empty\n");
+
+        close(client_socket);
+        printf("Terminated - client-fd: %d\n", client_socket);
     } else if (strncmp(url.start_addr, "/styles.css", strlen("/styles.css")) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
-        styles_get(client_socket);
+        styles_get(scratch_arena_raw);
     } else if (strncmp(url.start_addr, "/ ", strlen("/ ")) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            home_get(client_socket);
+            home_get(scratch_arena_raw);
         }
     } else if (strncmp(url.start_addr, "/sign-up", strlen("/sign-up")) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
@@ -1047,9 +1023,6 @@ void router(void *p_client_socket) {
     } else {
         not_found(client_socket);
     }
-
-router_cleanup:
-    arena_reset(p_scratch_arena, sizeof(Arena) + sizeof(ThreadData));
 }
 
 void resolve_slots(char *component_markdown, char *import_statement, char **templates) {
@@ -1179,142 +1152,165 @@ void sign_up_get(int client_socket) {
     close(client_socket);
 }
 
-void styles_get(int client_socket) {
-    Arena *p_scratch_arena = gp_scratch_arena;
+void styles_get(Arena *scratch_arena_raw) {
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+
+    int client_socket = scratch_arena_data->client_socket;
+
+    char *css = _p_global_arena_data->styles;
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/css\r\n\r\n";
-
-    char *css = gp_data->styles;
-
     size_t response_length = strlen(response_headers) + strlen(css);
 
-    char *response = (char *)arena_alloc(p_scratch_arena, response_length + 1);
+    char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
 
     sprintf(response, "%s%s", response_headers, css);
     response[response_length] = '\0';
 
     if (send(client_socket, response, strlen(response), 0) == -1) {
-        /** TODO: Write error to logs */
     }
 
     close(client_socket);
+    printf("terminated - client-fd: %d\n", client_socket);
+
+    arena_reset(scratch_arena_raw, sizeof(Arena) + sizeof(ScratchArenaDataLookup));
+
+    longjmp(ctx, 1);
 }
 
-void home_get(int client_socket) {
+void home_get(Arena *scratch_arena_raw) {
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+    scratch_arena_data->local = (HomeGetContext *)arena_alloc(scratch_arena_raw, sizeof(HomeGetContext));
+
+    HomeGetContext *local = scratch_arena_data->local;
+
+    Connection *conn;
+
     int i;
+    for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
+        if (connection_pool[i].alive && connection_pool[i].client.fd == 0) {
 
-    Arena *p_scratch_arena = gp_scratch_arena;
-    ThreadData *p_thread_data = gp_thread_data;
+            connection_pool[i].client.fd = scratch_arena_data->client_socket;
+            connection_pool[i].client.scratch_arena_raw = scratch_arena_raw;
+            connection_pool[i].client.scratch_arena_data = scratch_arena_data;
 
-    char *queries = (char *)p_scratch_arena->current;
-    p_thread_data->queries.start_addr = p_scratch_arena->current;
-    char *next_query = queries;
+            conn = &(connection_pool[i]);
 
-    uint8_t queries_count = 0;
-
-    char query01[] = "SELECT id FROM app.users;";
-    size_t query01_length = sizeof(query01);
-
-    next_query[0] = 'Q';
-    next_query++;
-
-    *((int32_t *)next_query) = htonl((int32_t)query01_length + (int32_t)sizeof(int32_t));
-    next_query += sizeof(int32_t);
-
-    memcpy(next_query, query01, query01_length);
-    next_query += query01_length;
-
-    queries_count++;
-
-    char query02[] = "SELECT email FROM app.users;";
-    size_t query02_length = sizeof(query02);
-
-    next_query[0] = 'Q';
-    next_query++;
-
-    *((int32_t *)next_query) = htonl((int32_t)query02_length + (int32_t)sizeof(int32_t));
-    next_query += sizeof(int32_t);
-
-    memcpy(next_query, query02, query02_length);
-    next_query += query02_length;
-
-    queries_count++;
-
-    p_thread_data->queries.end_addr = next_query;
-
-    next_query = queries;
-
-    event.events = EPOLLOUT | EPOLLET;
-    assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, postgres_socket, &event) >= 0);
-
-    nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, BLOCK_EXECUTION);
-    assert(nfds != -1);
-
-    assert(events[0].events & EPOLLOUT);
-
-    while (next_query < p_thread_data->queries.end_addr) {
-        void *msg = next_query;
-
-        int32_t query_length = *((int32_t *)((char *)msg + 1));
-
-        uint8_t *tmp = msg;
-        tmp += sizeof(char);
-        tmp += sizeof(int32_t);
-        tmp += strlen((char *)tmp) + 1;
-
-        size_t msg_length = tmp - (uint8_t *)msg;
-
-        ssize_t bytes_sent = send(postgres_socket, msg, msg_length, 0);
-
-        if (bytes_sent == -1 && errno == EAGAIN) {
-            /* If send buffer is full, try again later */
-            continue;
+            break;
         }
-
-        next_query += msg_length;
     }
 
-    event.events = EPOLLIN | EPOLLET;
-    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, postgres_socket, &event);
+    assert(conn != NULL);
 
-    uint8_t queries_responses_received = 0;
+    char message_type = 'Q';
+    char users_id_query_local[] = "SELECT id FROM app.users;";
+    int32_t message_length = htonl((int32_t)(sizeof(users_id_query_local)) + (int32_t)(sizeof(int32_t)));
+    size_t users_id_query_length = sizeof(char) + sizeof(int32_t) + (strlen(users_id_query_local) + 1);
 
-    nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, BLOCK_EXECUTION);
-    assert(nfds != -1);
+    uint8_t *users_id_query = arena_alloc(scratch_arena_raw, users_id_query_length);
+    memcpy(users_id_query, &message_type, sizeof(char));
+    memcpy(users_id_query + sizeof(char), &message_length, sizeof(int32_t));
+    memcpy(users_id_query + sizeof(char) + sizeof(int32_t), &users_id_query_local, (strlen(users_id_query_local) + 1));
 
-    assert(events[0].events & EPOLLIN);
+    local->users_id_query.start_addr = users_id_query;
+    local->users_id_query.end_addr = users_id_query + users_id_query_length;
 
-    while (queries_responses_received < queries_count) {
-        char buffer[4096];
-        int bytes_received = recv(postgres_socket, buffer, sizeof(buffer), 0);
-        if (bytes_received > 0) {
-            /* Process the PostgreSQL response */
-            printf("Received response: %s\n", buffer);
-        } else if (bytes_received == 0) {
-            /* Connection closed by the server */
-            printf("Connection closed by the server\n");
+    size_t msg_length = local->users_id_query.end_addr - local->users_id_query.start_addr;
+    ssize_t bytes_sent = send(conn->socket.fd, local->users_id_query.start_addr, msg_length, 0);
+    if (bytes_sent == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /** ? */
+            printf("here!?\n");
         }
-
-        queries_responses_received++;
     }
 
-    GlobalData *p_data = gp_data;
+retry:
+    local->users_id_query_response.start_addr = (uint8_t *)scratch_arena_raw->current;
+    ssize_t read_stream = 0;
+    while (1) {
+        uint8_t *ptr = local->users_id_query_response.start_addr + read_stream;
+
+        ssize_t incomming_stream_size = recv(conn->socket.fd, ptr, KB(1) - read_stream, 0);
+        if (incomming_stream_size == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                event.events = EPOLLIN | EPOLLET;
+                event.data.ptr = &(conn->socket);
+                epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->socket.fd, &event);
+
+                int r = setjmp(conn->client.jmp_buf);
+                if (r == 0) {
+                    longjmp(ctx, 1);
+                }
+
+                int index = from_index(r);
+
+                scratch_arena_data = connection_pool[index].client.scratch_arena_data;
+                scratch_arena_raw = scratch_arena_data->arena;
+
+                local = scratch_arena_data->local;
+                conn = &(connection_pool[index]);
+
+                goto retry;
+            }
+        }
+
+        if (incomming_stream_size == 0) {
+            printf("Postgres server closed connection\n");
+
+            break;
+        }
+
+        read_stream += incomming_stream_size;
+
+        if (incomming_stream_size <= 0) {
+            break;
+        }
+
+        local->users_id_query_response.end_addr = local->users_id_query_response.start_addr + read_stream;
+
+        ssize_t j;
+        for (j = 0; j < read_stream; j++) {
+            printf("%c", (unsigned char)local->users_id_query_response.start_addr[j]);
+            if (j == read_stream - 1) {
+                printf("\n");
+            }
+        }
+
+        break;
+    }
+
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-    char *template = get_value("home", p_data->html_templates);
+    char *template = get_value("home", p_global_arena_data->html_templates);
 
     size_t response_length = strlen(response_headers) + strlen(template);
 
-    char *response = (char *)arena_alloc(p_scratch_arena, response_length + 1);
+    char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
 
     sprintf(response, "%s%s", response_headers, template);
     response[response_length] = '\0';
 
-    if (send(client_socket, response, strlen(response), 0) == -1) {
+    int resl = send(scratch_arena_data->client_socket, response, strlen(response), 0);
+    if (resl == -1) {
         /** TODO: Write error to logs */
     }
 
-    close(client_socket);
+    close(scratch_arena_data->client_socket);
+    printf("Terminated - client-fd: %d\n", scratch_arena_data->client_socket);
+
+    h_count++;
+    printf("Handled requests: %d\n", h_count);
+
+    /* release connection for others to use */
+    memset(&(conn->client), 0, sizeof(Client));
+
+    event.events = EPOLLOUT | EPOLLET;
+    event.data.ptr = &(conn->socket);
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->socket.fd, &event);
+
+    arena_reset(scratch_arena_raw, sizeof(Arena) + sizeof(ScratchArenaDataLookup));
+    longjmp(ctx, 1); /** Jump back */
 }
 
 void not_found(int client_socket) {
@@ -1555,7 +1551,7 @@ RequestValue find_http_request_value(const char key[], char *request) {
     return value;
 }
 
-char *get_value(const char key[], StringsBlock block) {
+char *get_value(const char key[], CharsBlock block) {
     char *ptr = block.start_addr;
     while (ptr < block.end_addr) {
         if (strncmp(ptr, key, strlen(key)) == 0) {
@@ -1568,39 +1564,6 @@ char *get_value(const char key[], StringsBlock block) {
     }
 
     assert(0);
-}
-
-void enqueue_client_socket(int *client_socket) {
-    ClientSocketQueueNode *new_node = malloc(sizeof(ClientSocketQueueNode));
-    new_node->client_socket = client_socket;
-    new_node->next = NULL;
-
-    if (tail_client_socket_queue == NULL) {
-        head_client_socket_queue = new_node;
-    } else {
-        tail_client_socket_queue->next = new_node;
-    }
-
-    tail_client_socket_queue = new_node;
-}
-
-void *dequeue_client_socket() {
-    if (head_client_socket_queue == NULL) {
-        return NULL;
-    }
-
-    int *result = head_client_socket_queue->client_socket;
-    ClientSocketQueueNode *temp = head_client_socket_queue;
-    head_client_socket_queue = head_client_socket_queue->next;
-
-    if (head_client_socket_queue == NULL) {
-        tail_client_socket_queue = NULL;
-    }
-
-    free(temp);
-    temp = NULL;
-
-    return result;
 }
 
 void sigint_handler(int signo) {
