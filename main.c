@@ -27,7 +27,8 @@
 #define MAX_PATH_LENGTH 200
 #define MAX_HTML_FILES 20
 #define MAX_CONNECTIONS 100
-#define CONNECTION_POOL_SIZE 3
+#define MAX_QUEUING_REQUESTS MAX_CONNECTIONS
+#define CONNECTION_POOL_SIZE 1
 
 #define KB(value) ((value) * 1024)
 #define PAGE_SIZE KB(4)
@@ -58,10 +59,14 @@ typedef struct {
 typedef struct {
     SocketInfo socket_info;
     uint8_t alive;
-    uint8_t available;
     int client_fd;
     jmp_buf context;
 } DBSocketInfo;
+
+typedef struct {
+    int client_fd;
+    jmp_buf context;
+} RequestQueue;
 
 typedef struct {
     size_t size;
@@ -82,14 +87,14 @@ typedef struct {
 typedef struct {
     char *start_addr;
     char *end_addr;
-} StringsBlock;
+} CharsBlock;
 
 typedef struct {
     Arena *arena;
-    StringsBlock env;
-    StringsBlock html_files_paths;
-    StringsBlock components;
-    StringsBlock html_templates;
+    CharsBlock env;
+    CharsBlock html_files_paths;
+    CharsBlock components;
+    CharsBlock html_templates;
     MemBlock connection_msg;
     char *styles;
     SocketInfo *server_socket_info;
@@ -98,11 +103,37 @@ typedef struct {
 typedef struct {
     Arena *arena;
     SocketInfo *client_socket_info;
-    MemBlock connection_msg;
-    StringsBlock queries;
-    StringsBlock request;
-    u_int8_t release;
+    CharsBlock request;
+    CharsBlock queries;
+    MemBlock route_local_context;
+    /** inside the route handler route_local_context can be
+     * casted to it's correspondent type (ex: HomeGetContext) */
 } ScratchArenaDataLookup;
+
+typedef struct {
+    u_int8_t message_type;
+    u_int32_t query_length;
+    CharsBlock query;
+} Query;
+
+typedef struct {
+    size_t message_length;
+    Query message;
+} Message;
+
+/** LEFT OFF HERE! */
+typedef struct {
+    int i;
+    GlobalArenaDataLookup *p_global_arena_data;
+    ScratchArenaDataLookup *p_scratch_arena_data;
+    DBSocketInfo *conn;
+    RequestQueue *queued;
+    Message users_id_query;
+    CharsBlock users_id_query_response;
+    Message users_email_query;
+    CharsBlock users_email_query_response;
+    CharsBlock http_response;
+} HomeGetContext;
 
 void sigint_handler(int signo);
 void router(Arena *p_scratch_arena_raw);
@@ -120,13 +151,14 @@ void arena_free(Arena *arena);
 void arena_reset(Arena *arena, size_t arena_header_size);
 void read_file(char **buffer, long *file_size, char *absolute_file_path);
 void resolve_slots(char *component_markdown, char *import_statement, char **templates);
-char *get_value(const char key[], StringsBlock block);
+char *get_value(const char key[], CharsBlock block);
 RequestValue find_http_request_value(const char key[], char *request);
 uint16_t string_to_uint16(const char *str);
 
 volatile sig_atomic_t keep_running = 1;
 
 DBSocketInfo connection_pool[CONNECTION_POOL_SIZE];
+RequestQueue request_queue[MAX_QUEUING_REQUESTS];
 
 Arena *_p_global_arena_raw;
 GlobalArenaDataLookup *_p_global_arena_data;
@@ -137,6 +169,9 @@ struct epoll_event events[MAX_EVENTS];
 struct epoll_event event;
 
 jmp_buf main_context;
+jmp_buf main_context_conn;
+
+int h_count;
 
 int main() {
     int retval = 0;
@@ -730,7 +765,6 @@ int main() {
 
                     if (read_stream > 0) {
                         connection_pool[count].alive = 1;
-                        connection_pool[count].available = 1;
                         count++;
                     }
 
@@ -794,9 +828,28 @@ int main() {
                     if (events[i].events & EPOLLIN) {
                         Arena *p_scratch_arena_raw = (Arena *)((u_int8_t *)socket_info - sizeof(Arena));
 
+                        RequestQueue *tmp_queuing = request_queue;
+
+                        /** Check if there is requests queued */
+                        uint8_t j;
+                        for (j = 0; j < MAX_QUEUING_REQUESTS; j++) {
+                            if (tmp_queuing->client_fd == 0) {
+                                /** No more requests queued */
+                                break;
+                            }
+
+                            if (setjmp(main_context_conn) == 0) {
+                                longjmp(request_queue[j].context, 1);
+                            }
+                        }
+
+                        printf("back here\n");
+
                         if (setjmp(main_context) == 0) {
                             router(p_scratch_arena_raw);
                         }
+
+                        printf("or here\n");
 
                         break;
                     }
@@ -809,9 +862,10 @@ int main() {
 
                 case DB_SOCKET: {
                     if (events[i].events & EPOLLIN) {
-                        for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
-                            if (connection_pool[i].socket_info.fd == socket_info->fd) {
-                                longjmp(connection_pool[i].context, 1);
+                        u_int8_t j;
+                        for (j = 0; j < CONNECTION_POOL_SIZE; j++) {
+                            if (connection_pool[j].socket_info.fd == socket_info->fd) {
+                                longjmp(connection_pool[j].context, 1);
                             }
                         }
 
@@ -1007,6 +1061,9 @@ void router(Arena *p_scratch_arena_raw) {
 
     if (strlen(p_scratch_arena_data->request.start_addr) == 0) {
         printf("Request is empty\n");
+
+        close(client_socket);
+        printf("terminated - client-fd: %d\n", client_socket);
     } else if (strncmp(url.start_addr, "/styles.css", strlen("/styles.css")) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
         styles_get(p_scratch_arena_raw);
     } else if (strncmp(url.start_addr, "/ ", strlen("/ ")) == 0) {
@@ -1172,25 +1229,25 @@ void styles_get(Arena *p_scratch_arena_raw) {
     }
 
     close(client_socket);
+    printf("terminated - client-fd: %d\n", client_socket);
+
     arena_reset(p_scratch_arena_raw, sizeof(Arena) + sizeof(ScratchArenaDataLookup));
 
     longjmp(main_context, 1);
 }
 
 void home_get(Arena *p_scratch_arena_raw) {
+    int i;
     ScratchArenaDataLookup *p_scratch_arena_data = (ScratchArenaDataLookup *)((u_int8_t *)p_scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
-    volatile int i;
 
-    volatile int client_socket = p_scratch_arena_data->client_socket_info->fd;
-
-    volatile char *queries = (char *)p_scratch_arena_raw->current;
+    char *queries = (char *)p_scratch_arena_raw->current;
     p_scratch_arena_data->queries.start_addr = p_scratch_arena_raw->current;
-    volatile char *next_query = queries;
+    char *next_query = queries;
 
-    volatile uint8_t queries_count = 0;
+    uint8_t queries_count = 0;
 
-    volatile char query01[] = "SELECT id FROM app.users;";
-    volatile size_t query01_length = sizeof(query01);
+    char query01[] = "SELECT id FROM app.users;";
+    size_t query01_length = sizeof(query01);
 
     next_query[0] = 'Q';
     next_query++;
@@ -1203,7 +1260,7 @@ void home_get(Arena *p_scratch_arena_raw) {
 
     queries_count++;
 
-    volatile char query02[] = "SELECT email FROM app.users;";
+    char query02[] = "SELECT email FROM app.users;";
     size_t query02_length = sizeof(query02);
 
     next_query[0] = 'Q';
@@ -1221,35 +1278,56 @@ void home_get(Arena *p_scratch_arena_raw) {
 
     next_query = queries;
 
-    volatile DBSocketInfo *db_socket_info;
+    RequestQueue *queued_request = NULL;
 
-    volatile u_int8_t connection_index;
+    DBSocketInfo *db_socket_info = NULL;
 
-    volatile u_int8_t found_available_connection = 0;
+find_available_connection:
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
-        if (connection_pool[i].alive && connection_pool[i].available) {
-            connection_pool[i].available = 0;
-            db_socket_info = &(connection_pool[i]);
+        if (connection_pool[i].alive && connection_pool[i].client_fd == 0) {
+            connection_pool[i].client_fd = p_scratch_arena_data->client_socket_info->fd;
 
-            connection_index = i;
-            found_available_connection = 1;
+            db_socket_info = &(connection_pool[i]);
 
             break;
         }
+
+        if ((i + 1) == CONNECTION_POOL_SIZE) {
+            printf("Didn't find available connection in pool\n");
+
+            int j;
+            for (j = 0; j < MAX_QUEUING_REQUESTS; j++) {
+                /** Is it queued up already? */
+                if (request_queue[j].client_fd == p_scratch_arena_data->client_socket_info->fd) {
+                    longjmp(main_context, 1); /** this can't be used if it was used already ?? */
+
+                    printf("fffo\n");
+                } else {
+                    /** If queue slot is empty, use to queue up */
+                    if (request_queue[j].client_fd == 0) {
+                        request_queue[j].client_fd = p_scratch_arena_data->client_socket_info->fd;
+
+                        queued_request = &(request_queue[j]);
+
+                        if (setjmp(queued_request->context) == 0) {
+                            /**
+                             * Here we assume that this is the first call to router -> home_get
+                             * but for the program ever to come back here, a new event needs to
+                             * be triggered for client request, the problem is that the same client fd
+                             * won't ever trigger an event since it was read at router already.
+                             */
+                            longjmp(main_context, 1);
+                        }
+
+                        printf("Returned, try to find available connection again!\n");
+                        goto find_available_connection;
+                    }
+                }
+            }
+        }
     }
 
-    if (!found_available_connection) {
-        printf("Didn't find available connection in pool\n");
-
-        longjmp(main_context, 1);
-        assert(0);
-    }
-
-    if (db_socket_info == NULL) {
-        assert(0);
-    }
-
-    volatile u_int8_t qq = 0;
+    u_int8_t qq = 0;
 
     while (next_query < p_scratch_arena_data->queries.end_addr) {
         void *msg = next_query;
@@ -1263,10 +1341,13 @@ void home_get(Arena *p_scratch_arena_raw) {
 
         size_t msg_length = tmp - (uint8_t *)msg;
 
-        ssize_t bytes_sent = send(db_socket_info->socket_info.fd, msg, msg_length, 0);
+        SocketInfo *socket_info = &(db_socket_info->socket_info);
+
+        ssize_t bytes_sent = send(socket_info->fd, msg, msg_length, 0);
         if (bytes_sent == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 /** ? */
+                printf("here!?\n");
             }
         }
 
@@ -1274,9 +1355,11 @@ void home_get(Arena *p_scratch_arena_raw) {
         int bytes_received;
 
     retry:
-        assert(db_socket_info->socket_info.fd);
+        if (!socket_info->fd) {
+            assert(0);
+        }
 
-        bytes_received = recv(db_socket_info->socket_info.fd, buffer, sizeof(buffer), 0);
+        bytes_received = recv(socket_info->fd, buffer, sizeof(buffer), 0);
 
         if (bytes_received == -1) {
             /*
@@ -1285,12 +1368,14 @@ void home_get(Arena *p_scratch_arena_raw) {
 
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 event.events = EPOLLIN | EPOLLET;
-                event.data.ptr = &(db_socket_info->socket_info);
-                epoll_ctl(epoll_fd, EPOLL_CTL_MOD, db_socket_info->socket_info.fd, &event);
+                event.data.ptr = socket_info;
+                epoll_ctl(epoll_fd, EPOLL_CTL_MOD, socket_info->fd, &event);
 
                 if (setjmp(db_socket_info->context) == 0) {
                     longjmp(main_context, 1);
                 }
+
+                /** Set stack values again ??? */
 
                 goto retry;
             }
@@ -1301,7 +1386,16 @@ void home_get(Arena *p_scratch_arena_raw) {
             if (qq > 1) {
                 assert(0);
             }
-            printf("(client-fd: %d; postgres-fd: %d) - (Query: %d) - Received response: %s\n", client_socket, db_socket_info->socket_info.fd, qq, buffer);
+
+            if (p_scratch_arena_data->client_socket_info->fd > 200) {
+                printf("WHAT!?\n");
+            }
+
+            if (p_scratch_arena_data->client_socket_info->fd < 0) {
+                printf("WHAT!?\n");
+            }
+
+            printf("(client-fd: %d; postgres-fd: %d) - (Query: %d) - Received response: %s\n", p_scratch_arena_data->client_socket_info->fd, socket_info->fd, qq, buffer);
         } else if (bytes_received == 0) {
             /* Connection closed by the server */
             printf("Connection closed by the server\n");
@@ -1310,8 +1404,6 @@ void home_get(Arena *p_scratch_arena_raw) {
         qq++;
         next_query += msg_length;
     }
-
-    db_socket_info->client_fd = client_socket;
 
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
@@ -1325,19 +1417,31 @@ void home_get(Arena *p_scratch_arena_raw) {
     sprintf(response, "%s%s", response_headers, template);
     response[response_length] = '\0';
 
-    int resl = send(client_socket, response, strlen(response), 0);
+    int resl = send(p_scratch_arena_data->client_socket_info->fd, response, strlen(response), 0);
     if (resl == -1) {
         /** TODO: Write error to logs */
     }
 
-    close(client_socket);
-    printf("terminated - client-fd: %d\n", client_socket);
-
-    connection_pool[connection_index].available = 1;
+    close(p_scratch_arena_data->client_socket_info->fd);
+    printf("terminated - client-fd: %d\n", p_scratch_arena_data->client_socket_info->fd);
 
     arena_reset(p_scratch_arena_raw, sizeof(Arena) + sizeof(ScratchArenaDataLookup));
 
-    longjmp(main_context, 1);
+    h_count++;
+
+    printf("handled requests: %d\n", h_count);
+
+    db_socket_info->client_fd = 0;
+    memset(db_socket_info->context, 0, sizeof(jmp_buf));
+
+    if (queued_request == NULL) {
+        longjmp(main_context, 1);
+    } else {
+        queued_request->client_fd = 0;
+
+        memset(queued_request->context, 0, sizeof(jmp_buf));
+        longjmp(main_context_conn, 1);
+    }
 }
 
 void not_found(int client_socket) {
@@ -1578,7 +1682,7 @@ RequestValue find_http_request_value(const char key[], char *request) {
     return value;
 }
 
-char *get_value(const char key[], StringsBlock block) {
+char *get_value(const char key[], CharsBlock block) {
     char *ptr = block.start_addr;
     while (ptr < block.end_addr) {
         if (strncmp(ptr, key, strlen(key)) == 0) {
