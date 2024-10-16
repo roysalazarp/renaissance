@@ -28,7 +28,7 @@
 #define MAX_HTML_FILES 20
 #define MAX_CONNECTIONS 100
 #define MAX_QUEUING_REQUESTS MAX_CONNECTIONS
-#define CONNECTION_POOL_SIZE 1
+#define CONNECTION_POOL_SIZE 2
 
 #define KB(value) ((value) * 1024)
 #define PAGE_SIZE KB(4)
@@ -55,18 +55,6 @@ typedef struct {
     int fd;
     FDType type;
 } SocketInfo;
-
-typedef struct {
-    SocketInfo socket_info;
-    uint8_t alive;
-    int client_fd;
-    jmp_buf context;
-} DBSocketInfo;
-
-typedef struct {
-    int client_fd;
-    jmp_buf context;
-} RequestQueue;
 
 typedef struct {
     size_t size;
@@ -104,16 +92,15 @@ typedef struct {
     Arena *arena;
     SocketInfo *client_socket_info;
     CharsBlock request;
-    CharsBlock queries;
-    MemBlock route_local_context;
+    void *route_local_context;
     /** inside the route handler route_local_context can be
      * casted to it's correspondent type (ex: HomeGetContext) */
 } ScratchArenaDataLookup;
 
 typedef struct {
-    u_int8_t message_type;
-    u_int32_t query_length;
-    CharsBlock query;
+    uint8_t message_type;
+    int32_t message_length;
+    char *query;
 } Query;
 
 typedef struct {
@@ -121,14 +108,24 @@ typedef struct {
     Query message;
 } Message;
 
-/** LEFT OFF HERE! */
 typedef struct {
-    int i;
-    GlobalArenaDataLookup *p_global_arena_data;
-    ScratchArenaDataLookup *p_scratch_arena_data;
+    SocketInfo socket_info;
+    uint8_t alive;
+    ScratchArenaDataLookup *data;
+    int client_fd;
+    jmp_buf context;
+} DBSocketInfo;
+
+typedef struct {
+    int client_fd;
+    ScratchArenaDataLookup *data;
+    jmp_buf context;
+} RequestQueue;
+
+typedef struct {
     DBSocketInfo *conn;
     RequestQueue *queued;
-    Message users_id_query;
+    MemBlock users_id_query;
     CharsBlock users_id_query_response;
     Message users_email_query;
     CharsBlock users_email_query_response;
@@ -140,7 +137,7 @@ void router(Arena *p_scratch_arena_raw);
 void sign_up_create_user_post(int client_socket);
 void sign_up_get(int client_socket);
 void styles_get(Arena *p_scratch_arena_raw);
-void home_get(Arena *p_scratch_arena_raw);
+void home_get(Arena *p_scratch_arena_raw, ScratchArenaDataLookup *p_scratch_arena_data);
 void not_found(int client_socket);
 void locate_html_files(char *buffer, const char *base_path, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
 void url_decode(char **string);
@@ -639,7 +636,10 @@ int main() {
 
     p_global_arena_data->server_socket_info = server_socket_info;
 
+    /*
     event.events = EPOLLIN | EPOLLET;
+    */
+    event.events = EPOLLIN;
     event.data.ptr = server_socket_info;
     assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) != -1);
 
@@ -674,7 +674,7 @@ int main() {
         assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, connection_pool[i].socket_info.fd, &event) != -1);
     }
 
-    uint8_t *connection_msg = (u_int8_t *)p_global_arena_raw->current;
+    uint8_t *connection_msg = (uint8_t *)p_global_arena_raw->current;
     p_global_arena_data->connection_msg.start_addr = p_global_arena_raw->current;
     uint8_t *tmp_connection_msg = connection_msg;
 
@@ -811,7 +811,7 @@ int main() {
 
                         p_scratch_arena_data->client_socket_info = client_socket_info;
 
-                        event.events = EPOLLIN;
+                        event.events = EPOLLIN | EPOLLET;
                         event.data.ptr = client_socket_info;
                         assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) != -1);
 
@@ -826,30 +826,13 @@ int main() {
 
                 case CLIENT_SOCKET: {
                     if (events[i].events & EPOLLIN) {
-                        Arena *p_scratch_arena_raw = (Arena *)((u_int8_t *)socket_info - sizeof(Arena));
-
-                        RequestQueue *tmp_queuing = request_queue;
-
-                        /** Check if there is requests queued */
-                        uint8_t j;
-                        for (j = 0; j < MAX_QUEUING_REQUESTS; j++) {
-                            if (tmp_queuing->client_fd == 0) {
-                                /** No more requests queued */
-                                break;
-                            }
-
-                            if (setjmp(main_context_conn) == 0) {
-                                longjmp(request_queue[j].context, 1);
-                            }
-                        }
-
-                        printf("back here\n");
+                        Arena *p_scratch_arena_raw = (Arena *)((uint8_t *)socket_info - sizeof(Arena));
 
                         if (setjmp(main_context) == 0) {
                             router(p_scratch_arena_raw);
                         }
 
-                        printf("or here\n");
+                        printf("\n");
 
                         break;
                     }
@@ -862,17 +845,54 @@ int main() {
 
                 case DB_SOCKET: {
                     if (events[i].events & EPOLLIN) {
-                        u_int8_t j;
+                        uint8_t j;
                         for (j = 0; j < CONNECTION_POOL_SIZE; j++) {
                             if (connection_pool[j].socket_info.fd == socket_info->fd) {
+                                uint8_t f;
+                                for (f = 0; f < MAX_QUEUING_REQUESTS; f++) {
+                                    if (request_queue[f].client_fd == connection_pool[j].client_fd) {
+                                        longjmp(request_queue[f].context, 1);
+                                    }
+                                }
+
                                 longjmp(connection_pool[j].context, 1);
                             }
                         }
 
                     } else if (events[i].events & EPOLLOUT) {
-                        printf("DB socket ready for writting\n");
+                        if (request_queue[0].client_fd == 0) {
+                            /** No more requests queued */
+                            goto try_later;
+                        }
+
+                        uint8_t k;
+                        for (k = 0; k < CONNECTION_POOL_SIZE; k++) {
+                            if (connection_pool[k].client_fd == 0) {
+                                /** free connection */
+                                /** Check if there is requests queued */
+                                printf("Available connection\n");
+                                uint8_t j;
+                                for (j = 0; j < MAX_QUEUING_REQUESTS; j++) {
+                                    if (request_queue[j].client_fd == 0) {
+                                        /** No more requests queued */
+                                        goto try_later;
+                                    }
+
+                                    connection_pool[k].client_fd = request_queue[j].client_fd;
+                                    connection_pool[k].data->route_local_context = (DBSocketInfo *)socket_info;
+
+                                    if (setjmp(main_context_conn) == 0) {
+                                        /** After jumping into the following longjmp data is undefined */
+                                        longjmp(request_queue[j].context, 1);
+                                    }
+                                }
+
+                                break;
+                            }
+                        }
                     }
 
+                try_later:
                     break;
                 }
 
@@ -946,9 +966,13 @@ ssize_t write_all(int sockfd, const void *buf, size_t len) {
 }
 
 void router(Arena *p_scratch_arena_raw) {
-    ScratchArenaDataLookup *p_scratch_arena_data = (ScratchArenaDataLookup *)((u_int8_t *)p_scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+    int i;
+
+    ScratchArenaDataLookup *p_scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)p_scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
 
     int client_socket = p_scratch_arena_data->client_socket_info->fd;
+
+    printf("handling - client-fd: %d\n", client_socket);
 
     char *request = (char *)p_scratch_arena_raw->current;
     p_scratch_arena_data->request.start_addr = p_scratch_arena_raw->current;
@@ -1059,6 +1083,8 @@ void router(Arena *p_scratch_arena_raw) {
 
     RequestValue url = find_http_request_value("URL", p_scratch_arena_data->request.start_addr);
 
+    p_scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)p_scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+
     if (strlen(p_scratch_arena_data->request.start_addr) == 0) {
         printf("Request is empty\n");
 
@@ -1068,7 +1094,8 @@ void router(Arena *p_scratch_arena_raw) {
         styles_get(p_scratch_arena_raw);
     } else if (strncmp(url.start_addr, "/ ", strlen("/ ")) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            home_get(p_scratch_arena_raw);
+            p_scratch_arena_data->route_local_context = (HomeGetContext *)arena_alloc(p_scratch_arena_raw, sizeof(HomeGetContext));
+            home_get(p_scratch_arena_raw, p_scratch_arena_data);
         }
     } else if (strncmp(url.start_addr, "/sign-up", strlen("/sign-up")) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
@@ -1211,7 +1238,7 @@ void sign_up_get(int client_socket) {
 }
 
 void styles_get(Arena *p_scratch_arena_raw) {
-    ScratchArenaDataLookup *p_scratch_arena_data = (ScratchArenaDataLookup *)((u_int8_t *)p_scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+    ScratchArenaDataLookup *p_scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)p_scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
 
     int client_socket = p_scratch_arena_data->client_socket_info->fd;
 
@@ -1236,58 +1263,15 @@ void styles_get(Arena *p_scratch_arena_raw) {
     longjmp(main_context, 1);
 }
 
-void home_get(Arena *p_scratch_arena_raw) {
+void home_get(Arena *p_scratch_arena_raw, ScratchArenaDataLookup *p_scratch_arena_data) {
     int i;
-    ScratchArenaDataLookup *p_scratch_arena_data = (ScratchArenaDataLookup *)((u_int8_t *)p_scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
 
-    char *queries = (char *)p_scratch_arena_raw->current;
-    p_scratch_arena_data->queries.start_addr = p_scratch_arena_raw->current;
-    char *next_query = queries;
-
-    uint8_t queries_count = 0;
-
-    char query01[] = "SELECT id FROM app.users;";
-    size_t query01_length = sizeof(query01);
-
-    next_query[0] = 'Q';
-    next_query++;
-
-    *((int32_t *)next_query) = htonl((int32_t)query01_length + (int32_t)sizeof(int32_t));
-    next_query += sizeof(int32_t);
-
-    memcpy(next_query, query01, query01_length);
-    next_query += query01_length;
-
-    queries_count++;
-
-    char query02[] = "SELECT email FROM app.users;";
-    size_t query02_length = sizeof(query02);
-
-    next_query[0] = 'Q';
-    next_query++;
-
-    *((int32_t *)next_query) = htonl((int32_t)query02_length + (int32_t)sizeof(int32_t));
-    next_query += sizeof(int32_t);
-
-    memcpy(next_query, query02, query02_length);
-    next_query += query02_length;
-
-    queries_count++;
-
-    p_scratch_arena_data->queries.end_addr = next_query;
-
-    next_query = queries;
-
-    RequestQueue *queued_request = NULL;
-
-    DBSocketInfo *db_socket_info = NULL;
-
-find_available_connection:
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
         if (connection_pool[i].alive && connection_pool[i].client_fd == 0) {
             connection_pool[i].client_fd = p_scratch_arena_data->client_socket_info->fd;
 
-            db_socket_info = &(connection_pool[i]);
+            ((HomeGetContext *)p_scratch_arena_data->route_local_context)->conn = &(connection_pool[i]);
+            ((HomeGetContext *)p_scratch_arena_data->route_local_context)->conn->data = p_scratch_arena_data;
 
             break;
         }
@@ -1306,10 +1290,15 @@ find_available_connection:
                     /** If queue slot is empty, use to queue up */
                     if (request_queue[j].client_fd == 0) {
                         request_queue[j].client_fd = p_scratch_arena_data->client_socket_info->fd;
+                        request_queue[j].data = p_scratch_arena_data;
 
-                        queued_request = &(request_queue[j]);
+                        ((HomeGetContext *)p_scratch_arena_data->route_local_context)->queued = &(request_queue[j]);
 
-                        if (setjmp(queued_request->context) == 0) {
+                        if (((HomeGetContext *)p_scratch_arena_data->route_local_context)->queued->client_fd == 110) {
+                            printf("\n");
+                        }
+
+                        if (setjmp(((HomeGetContext *)p_scratch_arena_data->route_local_context)->queued->context) == 0) {
                             /**
                              * Here we assume that this is the first call to router -> home_get
                              * but for the program ever to come back here, a new event needs to
@@ -1319,91 +1308,98 @@ find_available_connection:
                             longjmp(main_context, 1);
                         }
 
+                        p_scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)p_scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+
                         printf("Returned, try to find available connection again!\n");
-                        goto find_available_connection;
+
+                        goto connected;
                     }
                 }
             }
         }
     }
 
-    u_int8_t qq = 0;
+connected:
+    printf("\n");
 
-    while (next_query < p_scratch_arena_data->queries.end_addr) {
-        void *msg = next_query;
+    char message_type = 'Q';
+    char users_id_query_local[] = "SELECT id FROM app.users;";
+    int32_t message_length = htonl((int32_t)(sizeof(users_id_query_local)) + (int32_t)(sizeof(int32_t)));
+    size_t users_id_query_length = sizeof(char) + sizeof(int32_t) + (strlen(users_id_query_local) + 1);
 
-        int32_t query_length = *((int32_t *)((char *)msg + 1));
+    uint8_t *users_id_query = arena_alloc(p_scratch_arena_raw, users_id_query_length);
+    memcpy(users_id_query, &message_type, sizeof(char));
+    memcpy(users_id_query + sizeof(char), &message_length, sizeof(int32_t));
+    memcpy(users_id_query + sizeof(char) + sizeof(int32_t), &users_id_query_local, (strlen(users_id_query_local) + 1));
 
-        uint8_t *tmp = msg;
-        tmp += sizeof(char);
-        tmp += sizeof(int32_t);
-        tmp += strlen((char *)tmp) + 1;
+    ((HomeGetContext *)p_scratch_arena_data->route_local_context)->users_id_query.start_addr = users_id_query;
+    ((HomeGetContext *)p_scratch_arena_data->route_local_context)->users_id_query.end_addr = users_id_query + users_id_query_length;
 
-        size_t msg_length = tmp - (uint8_t *)msg;
-
-        SocketInfo *socket_info = &(db_socket_info->socket_info);
-
-        ssize_t bytes_sent = send(socket_info->fd, msg, msg_length, 0);
-        if (bytes_sent == -1) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                /** ? */
-                printf("here!?\n");
-            }
+    size_t msg_length = ((HomeGetContext *)p_scratch_arena_data->route_local_context)->users_id_query.end_addr - ((HomeGetContext *)p_scratch_arena_data->route_local_context)->users_id_query.start_addr;
+    ssize_t bytes_sent = send(((HomeGetContext *)p_scratch_arena_data->route_local_context)->conn->socket_info.fd, ((HomeGetContext *)p_scratch_arena_data->route_local_context)->users_id_query.start_addr, msg_length, 0);
+    if (bytes_sent == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /** ? */
+            printf("here!?\n");
         }
+    }
 
-        char buffer[4096];
-        int bytes_received;
+retry:
+    if (!p_scratch_arena_data->route_local_context) {
+        printf("\n");
+    }
 
-    retry:
-        if (!socket_info->fd) {
-            assert(0);
-        }
+    ((HomeGetContext *)p_scratch_arena_data->route_local_context)->users_id_query_response.start_addr = (char *)p_scratch_arena_raw->current;
+    ssize_t read_stream = 0;
+    while (1) {
+        char *ptr = ((HomeGetContext *)p_scratch_arena_data->route_local_context)->users_id_query_response.start_addr + read_stream;
 
-        bytes_received = recv(socket_info->fd, buffer, sizeof(buffer), 0);
-
-        if (bytes_received == -1) {
-            /*
-            printf("Error: %s\n", strerror(errno));
-            */
-
+        ssize_t incomming_stream_size = recv(((HomeGetContext *)p_scratch_arena_data->route_local_context)->conn->socket_info.fd, ptr, KB(1) - read_stream, 0);
+        if (incomming_stream_size == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 event.events = EPOLLIN | EPOLLET;
-                event.data.ptr = socket_info;
-                epoll_ctl(epoll_fd, EPOLL_CTL_MOD, socket_info->fd, &event);
+                event.data.ptr = &(((HomeGetContext *)p_scratch_arena_data->route_local_context)->conn->socket_info);
+                epoll_ctl(epoll_fd, EPOLL_CTL_MOD, ((HomeGetContext *)p_scratch_arena_data->route_local_context)->conn->socket_info.fd, &event);
 
-                if (setjmp(db_socket_info->context) == 0) {
+                if (setjmp(((HomeGetContext *)p_scratch_arena_data->route_local_context)->conn->context) == 0) {
                     longjmp(main_context, 1);
                 }
-
-                /** Set stack values again ??? */
 
                 goto retry;
             }
         }
 
-        if (bytes_received > 0) {
-            /* Process the PostgreSQL response */
-            if (qq > 1) {
-                assert(0);
-            }
+        if (incomming_stream_size == 0) {
+            printf("Postgres server closed connection\n");
 
-            if (p_scratch_arena_data->client_socket_info->fd > 200) {
-                printf("WHAT!?\n");
-            }
-
-            if (p_scratch_arena_data->client_socket_info->fd < 0) {
-                printf("WHAT!?\n");
-            }
-
-            printf("(client-fd: %d; postgres-fd: %d) - (Query: %d) - Received response: %s\n", p_scratch_arena_data->client_socket_info->fd, socket_info->fd, qq, buffer);
-        } else if (bytes_received == 0) {
-            /* Connection closed by the server */
-            printf("Connection closed by the server\n");
+            break;
         }
 
-        qq++;
-        next_query += msg_length;
+        read_stream += incomming_stream_size;
+
+        if (incomming_stream_size <= 0) {
+            break;
+        }
+
+        ((HomeGetContext *)p_scratch_arena_data->route_local_context)->users_id_query_response.end_addr = ((HomeGetContext *)p_scratch_arena_data->route_local_context)->users_id_query_response.start_addr + read_stream;
+
+        ssize_t j;
+        for (j = 0; j < read_stream; j++) {
+            printf("%c", (unsigned char)((HomeGetContext *)p_scratch_arena_data->route_local_context)->users_id_query_response.start_addr[j]);
+            if (j == read_stream - 1) {
+                printf("\n");
+            }
+        }
+
+        break;
     }
+
+    ((HomeGetContext *)p_scratch_arena_data->route_local_context)->conn->client_fd = 0;
+    memset(((HomeGetContext *)p_scratch_arena_data->route_local_context)->conn->context, 0, sizeof(jmp_buf));
+
+    event.events = EPOLLOUT | EPOLLET;
+    event.data.ptr = &(((HomeGetContext *)p_scratch_arena_data->route_local_context)->conn->socket_info);
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, ((HomeGetContext *)p_scratch_arena_data->route_local_context)->conn->socket_info.fd, &event);
 
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
@@ -1425,21 +1421,18 @@ find_available_connection:
     close(p_scratch_arena_data->client_socket_info->fd);
     printf("terminated - client-fd: %d\n", p_scratch_arena_data->client_socket_info->fd);
 
-    arena_reset(p_scratch_arena_raw, sizeof(Arena) + sizeof(ScratchArenaDataLookup));
-
     h_count++;
 
     printf("handled requests: %d\n", h_count);
 
-    db_socket_info->client_fd = 0;
-    memset(db_socket_info->context, 0, sizeof(jmp_buf));
-
-    if (queued_request == NULL) {
+    if (((HomeGetContext *)p_scratch_arena_data->route_local_context)->queued == NULL) {
+        arena_reset(p_scratch_arena_raw, sizeof(Arena) + sizeof(ScratchArenaDataLookup));
         longjmp(main_context, 1);
     } else {
-        queued_request->client_fd = 0;
+        ((HomeGetContext *)p_scratch_arena_data->route_local_context)->queued->client_fd = 0;
+        memset(((HomeGetContext *)p_scratch_arena_data->route_local_context)->queued->context, 0, sizeof(jmp_buf));
 
-        memset(queued_request->context, 0, sizeof(jmp_buf));
+        arena_reset(p_scratch_arena_raw, sizeof(Arena) + sizeof(ScratchArenaDataLookup));
         longjmp(main_context_conn, 1);
     }
 }
