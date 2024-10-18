@@ -104,6 +104,7 @@ typedef struct {
 
 typedef struct {
     SocketInfo socket;
+    uint8_t index;
     Client client;
     uint8_t alive;
 } DBSocketInfo;
@@ -154,6 +155,9 @@ int epoll_fd;
 volatile int nfds;
 struct epoll_event events[MAX_EVENTS];
 struct epoll_event event;
+
+#define to_index(i) (i + 1)
+#define from_index(i) (i - 1)
 
 DBSocketInfo connection_pool[CONNECTION_POOL_SIZE];
 RequestQueue queue[MAX_QUEUING_REQUESTS];
@@ -661,6 +665,7 @@ int main() {
 
         connection_pool[i].socket.fd = db_fd;
         connection_pool[i].socket.type = DB_SOCKET;
+        connection_pool[i].index = i;
 
         event.events = EPOLLOUT | EPOLLET;
         event.data.ptr = &(connection_pool[i]);
@@ -845,30 +850,23 @@ int main() {
                                     ((GenericContext *)(connection_pool[j].client.scratch_arena_data->local))->connection = &(connection_pool[j]);
                                 }
 
-                                /** IMPORTANT:
-                                 * THIS IS THE WAY ALL longjmp(s) SHOULD BE CALLED AND RESTORED
-                                 */
-                                longjmp(connection_pool[j].client.jmp_buf, j + 1);
-                                /** IMPORTANT */
+                                longjmp(connection_pool[j].client.jmp_buf, to_index(j));
                             }
                         }
 
                     } else if (events[i].events & EPOLLOUT) {
                         if (queue[0].client.fd != 0) {
-                            uint8_t k;
-                            for (k = 0; k < CONNECTION_POOL_SIZE; k++) {
-                                if (connection_pool[k].socket.fd == socket_info->fd) {
-                                    connection_pool[k].client.fd = queue[0].client.fd;
-                                    connection_pool[k].client.scratch_arena_data->local = (DBSocketInfo *)socket_info;
+                            DBSocketInfo *db_socket = (DBSocketInfo *)socket_info;
 
-                                    queue[0].connection = &(connection_pool[k]);
+                            uint8_t index = db_socket->index;
+                            connection_pool[index].client = queue[0].client;
 
-                                    if (setjmp(db_socket_ctx) == 0) {
-                                        printf("gooooo\n");
-                                        /** After jumping into the following longjmp data is undefined */
-                                        longjmp(queue[0].client.jmp_buf, 1);
-                                    }
-                                }
+                            queue[0].connection = &(connection_pool[index]);
+
+                            if (setjmp(db_socket_ctx) == 0) {
+                                printf("gooooo\n");
+
+                                longjmp(queue[to_index(0)].client.jmp_buf, 1);
                             }
                         }
                     }
@@ -1246,38 +1244,46 @@ void home_get(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
     scratch_arena_data->local = (HomeGetContext *)arena_alloc(scratch_arena_raw, sizeof(HomeGetContext));
 
+    HomeGetContext *local = scratch_arena_data->local;
+
     int i;
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
         if (connection_pool[i].alive && connection_pool[i].client.fd == 0) {
-            connection_pool[i].client.fd = scratch_arena_data->client_socket;
 
-            ((HomeGetContext *)scratch_arena_data->local)->ctx.connection = &(connection_pool[i]);
-            ((HomeGetContext *)scratch_arena_data->local)->ctx.connection->client.scratch_arena_data = scratch_arena_data;
+            connection_pool[i].client.fd = scratch_arena_data->client_socket;
+            connection_pool[i].client.scratch_arena_raw = scratch_arena_raw;
+            connection_pool[i].client.scratch_arena_data = scratch_arena_data;
+
+            local->ctx.connection = &(connection_pool[i]);
+            local->ctx.connection->client.scratch_arena_data = scratch_arena_data;
 
             break;
         }
     }
 
-    if (((HomeGetContext *)scratch_arena_data->local)->ctx.connection == NULL) {
+    if (local->ctx.connection == NULL) {
         printf("Didn't find available connection in pool\n");
 
         for (i = 0; i < MAX_QUEUING_REQUESTS; i++) {
             if (queue[i].client.fd == 0) {
 
                 queue[i].client.fd = scratch_arena_data->client_socket;
+                queue[i].client.scratch_arena_raw = scratch_arena_raw;
                 queue[i].client.scratch_arena_data = scratch_arena_data;
+                queue[i].client.scratch_arena_data->local = local;
 
-                ((HomeGetContext *)scratch_arena_data->local)->ctx.queued = &(queue[i]);
+                local->ctx.queued = &(queue[i]);
 
                 int r = setjmp(queue[i].client.jmp_buf);
                 if (r == 0) {
-                    /** This code is called the first time try to handle the client_fd
-                    which means that the execution should go back to
-                    'case CLIENT_SOCKET' -> router(scratch_arena_raw); */
                     longjmp(client_socket_ctx, 1);
                 }
 
-                scratch_arena_data = queue[0].client.scratch_arena_data;
+                scratch_arena_data = queue[from_index(r)].client.scratch_arena_data;
+                scratch_arena_data->local = queue[from_index(r)].client.scratch_arena_data->local;
+                local = scratch_arena_data->local;
+
+                ((HomeGetContext *)scratch_arena_data->local)->ctx.connection = queue[from_index(r)].connection;
                 scratch_arena_raw = scratch_arena_data->arena;
 
                 break;
@@ -1308,10 +1314,6 @@ void home_get(Arena *scratch_arena_raw) {
     }
 
 retry:
-    if (!scratch_arena_data->local) {
-        printf("\n");
-    }
-
     ((HomeGetContext *)scratch_arena_data->local)->users_id_query_response.start_addr = (char *)scratch_arena_raw->current;
     ssize_t read_stream = 0;
     while (1) {
@@ -1324,18 +1326,13 @@ retry:
                 event.data.ptr = &(((HomeGetContext *)scratch_arena_data->local)->ctx.connection->socket);
                 epoll_ctl(epoll_fd, EPOLL_CTL_MOD, ((HomeGetContext *)scratch_arena_data->local)->ctx.connection->socket.fd, &event);
 
-                /** IMPORTANT:
-                 * THIS IS THE WAY ALL setjmp(s) SHOULD BE CALLED AND RESTORED
-                 */
                 int r = setjmp(((HomeGetContext *)scratch_arena_data->local)->ctx.connection->client.jmp_buf);
                 if (r == 0) {
                     longjmp(client_socket_ctx, 1);
                 }
 
-                scratch_arena_data = connection_pool[r - 1].client.scratch_arena_data;
+                scratch_arena_data = connection_pool[from_index(r)].client.scratch_arena_data;
                 scratch_arena_raw = scratch_arena_data->arena;
-
-                /** IMPORTANT */
 
                 goto retry;
             }
@@ -1366,8 +1363,11 @@ retry:
         break;
     }
 
+    memset(&(((HomeGetContext *)scratch_arena_data->local)->ctx.connection->client), 0, sizeof(Client));
+    /*
     ((HomeGetContext *)scratch_arena_data->local)->ctx.connection->client.fd = 0;
     memset(((HomeGetContext *)scratch_arena_data->local)->ctx.connection->client.jmp_buf, 0, sizeof(jmp_buf));
+    */
 
     event.events = EPOLLOUT | EPOLLET;
     event.data.ptr = &(((HomeGetContext *)scratch_arena_data->local)->ctx.connection->socket);
