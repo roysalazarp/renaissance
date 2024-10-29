@@ -83,6 +83,7 @@ typedef struct {
     CharsBlock html_templates;
     MemBlock connection_msg;
     char *styles;
+    char *manifest;
     SocketInfo *socket;
 } GlobalArenaDataLookup;
 
@@ -118,6 +119,7 @@ void router(Arena *scratch_arena_raw);
 void sign_up_create_user_post(int client_socket);
 void sign_up_get(int client_socket);
 void styles_get(Arena *scratch_arena_raw);
+void manifest_get(Arena *scratch_arena_raw);
 void home_get(Arena *scratch_arena_raw);
 void not_found(int client_socket);
 void locate_html_files(char *buffer, const char *base_path, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
@@ -582,6 +584,17 @@ int main() {
     free(styles_file_content);
     styles_file_content = NULL;
 
+    char *manifest = (char *)p_global_arena_raw->current;
+    p_global_arena_data->manifest = p_global_arena_raw->current;
+    char *manifest_filepath = "./templates/manifest.json";
+    char *manifest_file_content = NULL;
+    long manifest_file_size = 0;
+    read_file(&manifest_file_content, &manifest_file_size, manifest_filepath);
+    memcpy(manifest, manifest_file_content, manifest_file_size);
+    p_global_arena_raw->current = manifest + manifest_file_size + 1;
+    free(manifest_file_content);
+    manifest_file_content = NULL;
+
     /**
      * Registers a signal handler for SIGINT (to terminate the process)
      * to exit the program gracefully for Valgrind to show the program report.
@@ -1008,6 +1021,8 @@ void router(Arena *scratch_arena_raw) {
         printf("Terminated - client-fd: %d\n", client_socket);
     } else if (strncmp(url.start_addr, "/styles.css", strlen("/styles.css")) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
         styles_get(scratch_arena_raw);
+    } else if (strncmp(url.start_addr, "/manifest.json", strlen("/manifest.json")) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
+        manifest_get(scratch_arena_raw);
     } else if (strncmp(url.start_addr, "/ ", strlen("/ ")) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
             home_get(scratch_arena_raw);
@@ -1174,8 +1189,30 @@ void styles_get(Arena *scratch_arena_raw) {
     printf("terminated - client-fd: %d\n", client_socket);
 
     arena_reset(scratch_arena_raw, sizeof(Arena) + sizeof(ScratchArenaDataLookup));
+}
 
-    longjmp(ctx, 1);
+void manifest_get(Arena *scratch_arena_raw) {
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+
+    int client_socket = scratch_arena_data->client_socket;
+
+    char *manifest = _p_global_arena_data->manifest;
+
+    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\n\r\n";
+    size_t response_length = strlen(response_headers) + strlen(manifest);
+
+    char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
+
+    sprintf(response, "%s%s", response_headers, manifest);
+    response[response_length] = '\0';
+
+    if (send(client_socket, response, strlen(response), 0) == -1) {
+    }
+
+    close(client_socket);
+    printf("terminated - client-fd: %d\n", client_socket);
+
+    arena_free(scratch_arena_raw);
 }
 
 void home_get(Arena *scratch_arena_raw) {
@@ -1309,7 +1346,8 @@ retry:
     event.data.ptr = &(conn->socket);
     epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->socket.fd, &event);
 
-    arena_reset(scratch_arena_raw, sizeof(Arena) + sizeof(ScratchArenaDataLookup));
+    arena_free(scratch_arena_raw);
+
     longjmp(ctx, 1); /** Jump back */
 }
 
