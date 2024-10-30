@@ -25,7 +25,7 @@
 #endif
 
 #define MAX_PATH_LENGTH 200
-#define MAX_HTML_FILES 20
+#define MAX_FILES 20
 #define MAX_CONNECTIONS 100    /** ?? */
 #define CONNECTION_POOL_SIZE 5 /** ?? */
 
@@ -78,12 +78,12 @@ typedef struct {
 typedef struct {
     Arena *arena;
     CharsBlock env;
-    CharsBlock html_files_paths;
+    CharsBlock public_files_paths;
+    CharsBlock statics;
     CharsBlock components;
+    uint8_t components_count;
     CharsBlock html_templates;
     MemBlock connection_msg;
-    char *styles;
-    char *manifest;
     SocketInfo *socket;
 } GlobalArenaDataLookup;
 
@@ -122,7 +122,7 @@ void styles_get(Arena *scratch_arena_raw);
 void manifest_get(Arena *scratch_arena_raw);
 void home_get(Arena *scratch_arena_raw);
 void not_found(int client_socket);
-void locate_html_files(char *buffer, const char *base_path, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
+void locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
 void url_decode(char **string);
 char hex_to_char(char c);
 Arena *arena_init(size_t size);
@@ -134,6 +134,13 @@ void resolve_slots(char *component_markdown, char *import_statement, char **temp
 char *get_value(const char key[], CharsBlock block);
 RequestValue find_http_request_value(const char key[], char *request);
 uint16_t string_to_uint16(const char *str);
+void load_env_variables();
+void load_static();
+void load_html_components();
+void resolve_html_components_imports();
+SocketInfo *create_server_socket(uint16_t port);
+void create_connection_pool(int server_fd);
+void get_public_files_path();
 
 volatile sig_atomic_t keep_running = 1;
 
@@ -173,427 +180,11 @@ int main() {
 
     p_global_arena_data->arena = p_global_arena_raw;
 
-    /** The .env file stores all necessary environment variables. */
-    char *env_file_content = NULL;
-    long file_size = 0;
-    read_file(&env_file_content, &file_size, "./.env");
-
-    assert(file_size != 0);
-
-    char *env_vars = (char *)p_global_arena_raw->current;
-    p_global_arena_data->env.start_addr = p_global_arena_raw->current;
-    char *tmp_env_vars = env_vars;
-
-    char *env_file_line = env_file_content;
-    char *end_env_file = env_file_content + file_size;
-
-    while (env_file_line < end_env_file) { /** Parse basic .env file format. */
-        uint8_t env_var_name_processed = 0;
-        uint8_t env_var_value_processed = 0;
-
-        char *c = env_file_line;
-        if (*c == '\n') {
-            goto end_of_line;
-        }
-
-        if (*c == '#') {
-            while (*c != '\n') {
-                if (c == end_env_file) {
-                    goto end_of_line;
-                }
-
-                c++;
-            }
-
-            goto end_of_line;
-        }
-
-        while (isspace(*c)) {
-            if (c == end_env_file) {
-                goto end_of_line;
-            }
-
-            c++;
-        }
-
-        /** Processing of environment variable name begins. */
-
-        while (!(isspace(*c)) && *c != '=') {
-            if (c == end_env_file) {
-                /**
-                 * If we've reached the end while processing an env variable
-                 * name, such variable does not have an associated value.
-                 */
-                assert(0);
-            }
-
-            *tmp_env_vars = *c;
-            tmp_env_vars++;
-
-            c++;
-        }
-
-        *tmp_env_vars = '\0';
-        tmp_env_vars++;
-
-        env_var_name_processed = 1;
-
-        while (isspace(*c)) {
-            if (c == end_env_file) {
-                goto end_of_line;
-            }
-
-            c++;
-        }
-
-        if (*c != '=') {
-            assert(0);
-        } else {
-            c++;
-        }
-
-        while (isspace(*c)) {
-            if (c == end_env_file) {
-                goto end_of_line;
-            }
-
-            c++;
-        }
-
-        /** Processing of environment variable associated value begins. */
-
-        uint8_t processing_value = 0;
-        while (!(isspace(*c))) {
-            if ((*c) != '\0') {
-                processing_value = 1;
-            }
-
-            if (c == end_env_file) {
-                if (processing_value) {
-                    env_var_value_processed = 1;
-                }
-
-                goto end_of_line;
-            }
-
-            *tmp_env_vars = *c;
-            tmp_env_vars++;
-
-            c++;
-        }
-
-        *tmp_env_vars = '\0';
-        tmp_env_vars++;
-
-        env_var_value_processed = 1;
-
-        while (*c != '\n') {
-            if (c == end_env_file) {
-                goto end_of_line;
-            }
-
-            c++;
-        }
-
-    end_of_line:
-        env_file_line = c + 1;
-
-        if ((env_var_name_processed == 0) != (env_var_value_processed == 0)) {
-            /**
-             * Environment variable name and value must be processed together.
-             * One should not be processed without the other.
-             */
-            assert(0);
-        }
-
-        env_var_name_processed = 0;
-        env_var_value_processed = 0;
-    }
-
-    p_global_arena_raw->current = tmp_env_vars + 1;
-    p_global_arena_data->env.end_addr = (char *)p_global_arena_raw->current - 1;
-
-    /* We respond to browser requests with HTML using a hypermedia approach. */
-    char *html_files_paths = (char *)p_global_arena_raw->current;
-    p_global_arena_data->html_files_paths.start_addr = p_global_arena_raw->current;
-    char *base_path = get_value("TEMPLATES_FOLDER", p_global_arena_data->env);
-    uint8_t html_files_count = 0;
-    size_t all_paths_length = 0;
-    locate_html_files(html_files_paths, base_path, 0, &html_files_count, &all_paths_length);
-
-    p_global_arena_raw->current = (char *)p_global_arena_raw->current + all_paths_length;
-    p_global_arena_data->html_files_paths.end_addr = (char *)p_global_arena_raw->current - 1;
-
-    /* A Component is an HTML snippet that may include references to other HTML snippets, i.e., it is composable */
-    char *components = (char *)p_global_arena_raw->current;
-    p_global_arena_data->components.start_addr = p_global_arena_raw->current;
-    char *tmp_components = components;
-
-    char *tmp_html_files_paths = html_files_paths;
-    uint8_t components_count = 0;
-
-    i = 0;
-    while (i < html_files_count) {
-        char *file_content = NULL;
-        long file_size = 0;
-        read_file(&file_content, &file_size, tmp_html_files_paths); /** A .html file may contain multiple Components. */
-
-        char *tmp_file_content = file_content;
-        while ((tmp_file_content = strstr(tmp_file_content, COMPONENT_DEFINITION_OPENING_TAG__START)) != NULL) { /** Process Components inside .html file. */
-            char *component_name_start = tmp_file_content + strlen(COMPONENT_DEFINITION_OPENING_TAG__START);
-            char *component_name_end = NULL;
-
-            uint8_t component_name_length = 0;
-
-            if ((component_name_end = strchr(component_name_start, '\"')) != NULL) {
-                component_name_length = component_name_end - component_name_start;
-                strncpy(tmp_components, component_name_start, component_name_length);
-                tmp_components[component_name_length] = '\0';
-                tmp_components += component_name_length + 1;
-            } else {
-                assert(0);
-            }
-
-            char *comp = tmp_components; /** TODO: Make this variable name more descriptive */
-            char *tmp_component_markdown = tmp_file_content + strlen(COMPONENT_DEFINITION_OPENING_TAG__START) + (size_t)component_name_length + strlen(COMPONENT_DEFINITION_OPENING_TAG__END);
-
-            uint8_t skip_whitespace = 0;
-            while (*tmp_component_markdown) { /** Copy component markdown from file to buffer, removing unnecessary spaces. */
-                if (strncmp(tmp_component_markdown, COMPONENT_DEFINITION_CLOSING_TAG, strlen(COMPONENT_DEFINITION_CLOSING_TAG)) == 0) {
-                    break;
-                }
-
-                if (strlen(comp) == 0 && isspace(*tmp_component_markdown)) {
-                    skip_whitespace = 1;
-                    tmp_component_markdown++;
-                    continue;
-                }
-
-                if (*tmp_component_markdown == '>') {
-                    char *temp = tmp_component_markdown - 1;
-                    if (isspace(*temp) && !skip_whitespace) {
-                        uint8_t i = 0;
-                        while (*temp) {
-                            if (!isspace(*temp)) {
-                                skip_whitespace = 1;
-                                tmp_components -= i - 1;
-                                break;
-                            }
-
-                            temp -= 1;
-                            i++;
-                        }
-
-                        continue;
-                    }
-
-                    skip_whitespace = 1;
-                    goto copy_char;
-                }
-
-                if (*tmp_component_markdown == '<') {
-                    char *temp = tmp_component_markdown - 1;
-                    if (isspace(*temp) && /* strlen(tmp_components) > 0 && */ !skip_whitespace) {
-                        uint8_t i = 0;
-                        while (*temp) {
-                            if (!isspace(*temp)) {
-                                skip_whitespace = 1;
-                                tmp_components -= i - 1;
-                                break;
-                            }
-
-                            temp -= 1;
-                            i++;
-                        }
-
-                        continue;
-                    }
-
-                    skip_whitespace = 0;
-                    goto copy_char;
-                }
-
-                if (!skip_whitespace && *tmp_component_markdown == '\n') {
-                    tmp_component_markdown++;
-                    continue;
-                }
-
-                if (skip_whitespace && isspace(*tmp_component_markdown)) {
-                    tmp_component_markdown++;
-                    continue;
-                }
-
-                if (skip_whitespace && !isspace(*tmp_component_markdown)) {
-                    skip_whitespace = 0;
-                    goto copy_char;
-                }
-
-            copy_char:
-                *tmp_components = *tmp_component_markdown;
-                tmp_components++;
-
-                tmp_component_markdown++;
-            }
-
-            tmp_components[0] = '\0';
-            tmp_components++;
-
-            components_count++;
-            tmp_file_content++;
-        }
-
-        free(file_content);
-        file_content = NULL;
-
-        tmp_html_files_paths += strlen(tmp_html_files_paths) + 1; /* Move to next path */
-        i++;
-    }
-
-    p_global_arena_raw->current = tmp_components;
-    p_global_arena_data->components.end_addr = (char *)p_global_arena_raw->current - 1;
-
-    /* An HTML template is essentially a Component that has been compiled with all its imports. */
-    char *html_templates = (char *)p_global_arena_raw->current;
-    p_global_arena_data->html_templates.start_addr = p_global_arena_raw->current;
-
-    char *tmp_html_templates = html_templates;
-
-    tmp_components = components;
-
-    for (i = 0; i < components_count; i++) { /** Compile Components. */
-        uint8_t html_template_name_length = (uint8_t)strlen(tmp_components);
-        strncpy(tmp_html_templates, tmp_components, html_template_name_length);
-        tmp_html_templates[html_template_name_length] = '\0';
-
-        tmp_html_templates += html_template_name_length + 1;
-
-        tmp_components += strlen(tmp_components) + 1; /* Advance pointer to component markdown */
-
-        size_t component_markdown_length = strlen(tmp_components);
-        strncpy(tmp_html_templates, tmp_components, component_markdown_length);
-        tmp_html_templates[component_markdown_length] = '\0';
-
-        char *template_start = tmp_html_templates;
-
-        char *component_import_opening_tag = tmp_html_templates;
-        while ((component_import_opening_tag = strstr(component_import_opening_tag, COMPONENT_IMPORT_OPENING_TAG__START)) != NULL) { /** Resolve Component imports. */
-            tmp_html_templates += (component_import_opening_tag - tmp_html_templates);
-
-            char *import_name_start = component_import_opening_tag + strlen(COMPONENT_IMPORT_OPENING_TAG__START);
-            char *tmp_import_name = import_name_start;
-
-            uint8_t imported_name_length = 0;
-
-            while (*tmp_import_name) {
-                if (strncmp(tmp_import_name, OPENING_COMPONENT_IMPORT_TAG_SELF_CLOSING_END, strlen(OPENING_COMPONENT_IMPORT_TAG_SELF_CLOSING_END)) == 0) { /** Import doesn't contain "slots" */
-                    imported_name_length = tmp_import_name - import_name_start;
-
-                    char *tmp_components_j = components;
-
-                    uint8_t j;
-                    for (j = 0; j < components_count; j++) {
-                        if (strncmp(tmp_components_j, import_name_start, imported_name_length) == 0) {
-                            tmp_components_j += strlen(tmp_components_j) + 1; /* Advance pointer to component markdown */
-
-                            uint8_t import_statement_length = (uint8_t)strlen(COMPONENT_IMPORT_OPENING_TAG__START) + imported_name_length + (uint8_t)strlen(OPENING_COMPONENT_IMPORT_TAG_SELF_CLOSING_END);
-                            size_t component_markdown_length = strlen(tmp_components_j);
-
-                            size_t len = strlen(tmp_html_templates + import_statement_length);
-                            memmove(tmp_html_templates + component_markdown_length, tmp_html_templates + import_statement_length, len); /* ATTENTION! */
-                            char *ptr = tmp_html_templates + component_markdown_length + len;
-                            ptr[0] = '\0';
-                            ptr++;
-                            while (*ptr) {
-                                size_t str_len = strlen(ptr);
-                                memset(ptr, 0, str_len);
-                                ptr += str_len + 1;
-                            }
-
-                            memcpy(tmp_html_templates, tmp_components_j, component_markdown_length);
-
-                            break; /** We have successfully found the component related to
-                                    * the import and incorporated it into the template. */
-                        }
-
-                        /** This is not the component we are looking for... */
-                        tmp_components_j += strlen(tmp_components_j) + 1; /* Advance past the component name */
-                        tmp_components_j += strlen(tmp_components_j) + 1; /* Advance past the component markdown */
-
-                        if ((j + 1) == components_count) {
-                            printf("didn't find component\n");
-                            assert(0);
-                        }
-                    }
-
-                    /**
-                     * The component we imported may contain additional imports. Reset the pointer to
-                     * the start of the HTML template to check for imports from the beginning again.
-                     */
-                    tmp_html_templates = template_start;
-
-                    break;
-                }
-
-                if (strncmp(tmp_import_name, COMPONENT_IMPORT_OPENING_TAG__END, strlen(COMPONENT_IMPORT_OPENING_TAG__END)) == 0) { /** Import contain "slots" */
-                    imported_name_length = tmp_import_name - import_name_start;
-
-                    char *tmp_components_j = components;
-
-                    uint8_t j;
-                    for (j = 0; j < components_count; j++) {
-                        if (strncmp(tmp_components_j, import_name_start, imported_name_length) == 0) {
-                            tmp_components_j += strlen(tmp_components_j) + 1; /* Advance pointer to component markdown */
-
-                            resolve_slots(tmp_components_j, component_import_opening_tag, &tmp_html_templates);
-
-                            break; /** We have successfully found the component related to
-                                    * the import and incorporated it into the template. */
-                        }
-
-                        tmp_components_j += strlen(tmp_components_j) + 1; /* Advance past the component name */
-                        tmp_components_j += strlen(tmp_components_j) + 1; /* Advance past the component markdown */
-
-                        if ((j + 1) == components_count) {
-                            printf("didn't find component\n");
-                            assert(0);
-                        }
-                    }
-
-                    break;
-                }
-
-                tmp_import_name++;
-            }
-        }
-
-        tmp_components += strlen(tmp_components) + 1; /* Advance pointer to component name */
-        tmp_html_templates += strlen(tmp_html_templates) + 1;
-    }
-
-    p_global_arena_raw->current = tmp_html_templates;
-    p_global_arena_data->html_templates.end_addr = (char *)p_global_arena_raw->current - 1;
-
-    char *styles = (char *)p_global_arena_raw->current;
-    p_global_arena_data->styles = p_global_arena_raw->current;
-    char *styles_filepath = "./templates/styles.css";
-    char *styles_file_content = NULL;
-    long styles_file_size = 0;
-    read_file(&styles_file_content, &styles_file_size, styles_filepath); /** TODO: Minify CSS */
-    memcpy(styles, styles_file_content, styles_file_size);
-    p_global_arena_raw->current = styles + styles_file_size + 1;
-    free(styles_file_content);
-    styles_file_content = NULL;
-
-    char *manifest = (char *)p_global_arena_raw->current;
-    p_global_arena_data->manifest = p_global_arena_raw->current;
-    char *manifest_filepath = "./templates/manifest.json";
-    char *manifest_file_content = NULL;
-    long manifest_file_size = 0;
-    read_file(&manifest_file_content, &manifest_file_size, manifest_filepath);
-    memcpy(manifest, manifest_file_content, manifest_file_size);
-    p_global_arena_raw->current = manifest + manifest_file_size + 1;
-    free(manifest_file_content);
-    manifest_file_content = NULL;
+    load_env_variables();
+    get_public_files_path();
+    load_static();
+    load_html_components();
+    resolve_html_components_imports();
 
     /**
      * Registers a signal handler for SIGINT (to terminate the process)
@@ -605,31 +196,8 @@ int main() {
     assert(epoll_fd != -1);
 
     uint16_t port = 8080;
-
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    assert(server_fd != -1);
-
-    int server_fd_flags = fcntl(server_fd, F_GETFL, 0);
-    assert(fcntl(server_fd, F_SETFL, server_fd_flags | O_NONBLOCK) != -1);
-
-    int server_fd_optname = 1;
-    assert(setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &server_fd_optname, sizeof(int)) != -1);
-
-    /** Configure server address */
-    struct sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;         /** IPv4 */
-    server_addr.sin_port = htons(port);       /** Convert the port number from host byte order to network byte order (big-endian) */
-    server_addr.sin_addr.s_addr = INADDR_ANY; /** Listen on all available network interfaces (IPv4 addresses) */
-
-    assert(bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) != -1);
-
-    assert(listen(server_fd, MAX_CONNECTIONS) != -1);
-
-    SocketInfo *server_socket = arena_alloc(p_global_arena_raw, sizeof(SocketInfo));
-    server_socket->fd = server_fd;
-    server_socket->type = SERVER_SOCKET;
-
-    p_global_arena_data->socket = server_socket;
+    SocketInfo *server_socket = create_server_socket(port);
+    int server_fd = server_socket->fd;
 
     event.events = EPOLLIN;
     event.data.ptr = server_socket;
@@ -637,143 +205,7 @@ int main() {
 
     printf("Server listening on port: %d...\n", port);
 
-    for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
-        int db_fd = socket(AF_INET, SOCK_STREAM, 0);
-        assert(db_fd != -1);
-
-        int db_fd_flags = fcntl(server_fd, F_GETFL, 0);
-        assert(fcntl(db_fd, F_SETFL, db_fd_flags | O_NONBLOCK) != -1);
-
-        int db_fd_optname = 1;
-        assert(setsockopt(db_fd, SOL_SOCKET, SO_REUSEADDR, &db_fd_optname, sizeof(int)) != -1);
-
-        struct sockaddr_in db_addr;
-        db_addr.sin_family = AF_INET;
-        db_addr.sin_port = htons(string_to_uint16(get_value("DB_PORT", p_global_arena_data->env)));
-
-        memset(&db_addr.sin_zero, 0, sizeof(db_addr.sin_zero));
-        assert(inet_pton(AF_INET, get_value("DB_HOST", p_global_arena_data->env), &db_addr.sin_addr) > 0);
-
-        if (connect(db_fd, (struct sockaddr *)&db_addr, sizeof(db_addr)) < 0) {
-            assert(errno == EINPROGRESS);
-        }
-
-        connection_pool[i].socket.fd = db_fd;
-        connection_pool[i].socket.type = DB_SOCKET;
-        connection_pool[i].index = i;
-
-        event.events = EPOLLOUT | EPOLLET;
-        event.data.ptr = &(connection_pool[i]);
-        assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, connection_pool[i].socket.fd, &event) != -1);
-    }
-
-    uint8_t *connection_msg = (uint8_t *)p_global_arena_raw->current;
-    p_global_arena_data->connection_msg.start_addr = p_global_arena_raw->current;
-    uint8_t *tmp_connection_msg = connection_msg;
-
-    /** Leave space at the very beginning for msg_length */
-    tmp_connection_msg += sizeof(u_int32_t);
-
-    u_int32_t protocol_version = htonl(0x00030000); /** version 3.0 */
-    memcpy(tmp_connection_msg, &protocol_version, sizeof(protocol_version));
-    tmp_connection_msg += sizeof(protocol_version);
-
-    memcpy(tmp_connection_msg, "user", sizeof("user"));
-    tmp_connection_msg += sizeof("user");
-
-    char *user = get_value("DB_USER", p_global_arena_data->env);
-    memcpy(tmp_connection_msg, user, strlen(user));
-    tmp_connection_msg += strlen(user);
-    *tmp_connection_msg = '\0';
-    tmp_connection_msg++;
-
-    memcpy(tmp_connection_msg, "database", sizeof("database"));
-    tmp_connection_msg += sizeof("database");
-
-    char *database = get_value("DB_NAME", p_global_arena_data->env);
-    memcpy(tmp_connection_msg, database, strlen(database));
-    tmp_connection_msg += strlen(database);
-    *tmp_connection_msg = '\0';
-    tmp_connection_msg++;
-
-    *tmp_connection_msg = '\0';
-    tmp_connection_msg++;
-
-    size_t connection_msg_size = tmp_connection_msg - connection_msg;
-    u_int32_t msg_length = htonl((u_int32_t)connection_msg_size);
-    memcpy(connection_msg, &msg_length, sizeof(msg_length));
-
-    p_global_arena_raw->current = tmp_connection_msg;
-    p_global_arena_data->connection_msg.end_addr = (uint8_t *)p_global_arena_raw->current - 1;
-
-    int count = 0;
-    while (count < CONNECTION_POOL_SIZE) {
-        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, BLOCK_EXECUTION);
-        assert(nfds != -1);
-
-        for (i = 0; i < nfds; i++) {
-            SocketInfo *socket_info = (SocketInfo *)events[i].data.ptr;
-
-            if (socket_info->type == DB_SOCKET) {
-                if (events[i].events & EPOLLOUT) {
-                    ssize_t bytes_sent = send(socket_info->fd, connection_msg, connection_msg_size, 0);
-                    if (bytes_sent == -1 && errno == EAGAIN) {
-                        /* If send buffer is full, try again later */
-                        continue;
-                    }
-
-                    event.events = EPOLLIN | EPOLLET;
-                    event.data.ptr = socket_info;
-                    assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, socket_info->fd, &event) >= 0);
-                } else if (events[i].events & EPOLLIN) {
-                    char db_connection_response[KB(1)];
-                    memset(db_connection_response, 0, sizeof(db_connection_response));
-
-                    char *tmp_response = db_connection_response;
-                    ssize_t read_stream = 0;
-
-                    while (1) {
-                        char *ptr = tmp_response + read_stream;
-
-                        ssize_t incomming_stream_size = recv(socket_info->fd, ptr, sizeof(db_connection_response) - read_stream, 0);
-                        if (incomming_stream_size == -1) {
-                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                                break;
-                            }
-                        }
-
-                        if (incomming_stream_size == 0) {
-                            printf("Postgres server closed connection\n");
-
-                            break;
-                        }
-
-                        read_stream += incomming_stream_size;
-
-                        if (incomming_stream_size <= 0) {
-                            break;
-                        }
-
-                        assert(read_stream < (ssize_t)sizeof(db_connection_response));
-                    }
-
-                    if (read_stream > 0) {
-                        connection_pool[count].alive = 1;
-                        count++;
-                    }
-
-                    /** TODO: Instead of printing raw bytes, decode to data structure. */
-                    ssize_t j;
-                    for (j = 0; j < read_stream; j++) {
-                        printf("%c", (unsigned char)db_connection_response[j]);
-                        if (j == read_stream - 1) {
-                            printf("\n");
-                        }
-                    }
-                }
-            }
-        }
-    }
+    create_connection_pool(server_fd);
 
     struct sockaddr_in client_addr; /** Why is this needed ?? */
     socklen_t client_addr_len = sizeof(client_addr);
@@ -1172,7 +604,23 @@ void styles_get(Arena *scratch_arena_raw) {
 
     int client_socket = scratch_arena_data->client_socket;
 
-    char *css = _p_global_arena_data->styles;
+    char *tmp_statics = _p_global_arena_data->statics.start_addr;
+    char *end = _p_global_arena_data->statics.end_addr;
+
+    char *css;
+
+    char key[] = "./public/styles.css";
+    while (tmp_statics < end) {
+        if (strncmp(key, tmp_statics, strlen(key)) == 0) {
+            tmp_statics += strlen(tmp_statics) + 1;
+
+            css = tmp_statics;
+            break;
+        }
+
+        tmp_statics += strlen(tmp_statics) + 1;
+        tmp_statics += strlen(tmp_statics) + 1;
+    }
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/css\r\n\r\n";
     size_t response_length = strlen(response_headers) + strlen(css);
@@ -1196,7 +644,23 @@ void manifest_get(Arena *scratch_arena_raw) {
 
     int client_socket = scratch_arena_data->client_socket;
 
-    char *manifest = _p_global_arena_data->manifest;
+    char *tmp_statics = _p_global_arena_data->statics.start_addr;
+    char *end = _p_global_arena_data->statics.end_addr;
+
+    char *manifest;
+
+    char key[] = "./public/manifest.json";
+    while (tmp_statics < end) {
+        if (strncmp(key, tmp_statics, strlen(key)) == 0) {
+            tmp_statics += strlen(tmp_statics) + 1;
+
+            manifest = tmp_statics;
+            break;
+        }
+
+        tmp_statics += strlen(tmp_statics) + 1;
+        tmp_statics += strlen(tmp_statics) + 1;
+    }
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\n\r\n";
     size_t response_length = strlen(response_headers) + strlen(manifest);
@@ -1408,7 +872,7 @@ char hex_to_char(char c) {
  * @total_html_files:  A pointer to a counter that tracks the total number of .html files found.
  * @all_paths_length:  A pointer to track the total length of all file paths combined (including null terminators).
  */
-void locate_html_files(char *buffer, const char *base_path, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length) {
+void locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_files, size_t *all_paths_length) {
     DIR *dir = opendir(base_path);
     assert(dir != NULL);
 
@@ -1421,17 +885,17 @@ void locate_html_files(char *buffer, const char *base_path, uint8_t level, uint8
             sprintf(path, "%s/%s", base_path, entry->d_name);
 
             if (stat(path, &statbuf) == 0 && S_ISDIR(statbuf.st_mode)) {
-                locate_html_files(buffer, path, level + 1, total_html_files, all_paths_length);
+                locate_files(buffer, path, extension, level + 1, total_files, all_paths_length);
             } else {
                 entry_name_length = strlen(entry->d_name);
-                if (entry_name_length > 5 && strcmp(entry->d_name + entry_name_length - 5, ".html") == 0) {
-                    assert(*total_html_files < MAX_HTML_FILES);
+                if ((extension == NULL) || ((entry_name_length > strlen(extension)) && (strcmp(entry->d_name + entry_name_length - strlen(extension), extension) == 0))) {
+                    assert(*total_files < MAX_FILES);
                     size_t path_len = strlen(path);
                     strcpy(buffer, path);
                     buffer[path_len] = '\0';
                     buffer += (path_len + 1);
                     (*all_paths_length) = (*all_paths_length) + (path_len + 1);
-                    (*total_html_files)++;
+                    (*total_files)++;
                 }
             }
         }
@@ -1608,6 +1072,658 @@ void sigint_handler(int signo) {
     if (signo == SIGINT) {
         printf("\nReceived SIGINT, exiting program...\n");
         keep_running = 0;
+    }
+}
+
+void load_env_variables() {
+    Arena *p_global_arena_raw = _p_global_arena_raw;
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+
+    char *env_file_content = NULL;
+    long file_size = 0;
+    read_file(&env_file_content, &file_size, "./.env");
+
+    assert(file_size != 0);
+
+    char *env_vars = (char *)p_global_arena_raw->current;
+    p_global_arena_data->env.start_addr = p_global_arena_raw->current;
+    char *tmp_env_vars = env_vars;
+
+    char *env_file_line = env_file_content;
+    char *end_env_file = env_file_content + file_size;
+
+    while (env_file_line < end_env_file) { /** Parse basic .env file format. */
+        uint8_t env_var_name_processed = 0;
+        uint8_t env_var_value_processed = 0;
+
+        char *c = env_file_line;
+        if (*c == '\n') {
+            goto end_of_line;
+        }
+
+        if (*c == '#') {
+            while (*c != '\n') {
+                if (c == end_env_file) {
+                    goto end_of_line;
+                }
+
+                c++;
+            }
+
+            goto end_of_line;
+        }
+
+        while (isspace(*c)) {
+            if (c == end_env_file) {
+                goto end_of_line;
+            }
+
+            c++;
+        }
+
+        /** Processing of environment variable name begins. */
+
+        while (!(isspace(*c)) && *c != '=') {
+            if (c == end_env_file) {
+                /**
+                 * If we've reached the end while processing an env variable
+                 * name, such variable does not have an associated value.
+                 */
+                assert(0);
+            }
+
+            *tmp_env_vars = *c;
+            tmp_env_vars++;
+
+            c++;
+        }
+
+        *tmp_env_vars = '\0';
+        tmp_env_vars++;
+
+        env_var_name_processed = 1;
+
+        while (isspace(*c)) {
+            if (c == end_env_file) {
+                goto end_of_line;
+            }
+
+            c++;
+        }
+
+        if (*c != '=') {
+            assert(0);
+        } else {
+            c++;
+        }
+
+        while (isspace(*c)) {
+            if (c == end_env_file) {
+                goto end_of_line;
+            }
+
+            c++;
+        }
+
+        /** Processing of environment variable associated value begins. */
+
+        uint8_t processing_value = 0;
+        while (!(isspace(*c))) {
+            if ((*c) != '\0') {
+                processing_value = 1;
+            }
+
+            if (c == end_env_file) {
+                if (processing_value) {
+                    env_var_value_processed = 1;
+                }
+
+                goto end_of_line;
+            }
+
+            *tmp_env_vars = *c;
+            tmp_env_vars++;
+
+            c++;
+        }
+
+        *tmp_env_vars = '\0';
+        tmp_env_vars++;
+
+        env_var_value_processed = 1;
+
+        while (*c != '\n') {
+            if (c == end_env_file) {
+                goto end_of_line;
+            }
+
+            c++;
+        }
+
+    end_of_line:
+        env_file_line = c + 1;
+
+        if ((env_var_name_processed == 0) != (env_var_value_processed == 0)) {
+            /**
+             * Environment variable name and value must be processed together.
+             * One should not be processed without the other.
+             */
+            assert(0);
+        }
+
+        env_var_name_processed = 0;
+        env_var_value_processed = 0;
+    }
+
+    p_global_arena_raw->current = tmp_env_vars + 1;
+    p_global_arena_data->env.end_addr = (char *)p_global_arena_raw->current - 1;
+}
+
+void get_public_files_path() {
+    Arena *p_global_arena_raw = _p_global_arena_raw;
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+
+    char *public_files_paths = (char *)p_global_arena_raw->current;
+    p_global_arena_data->public_files_paths.start_addr = p_global_arena_raw->current;
+    char *base_path = get_value("PUBLIC_FOLDER", p_global_arena_data->env);
+    uint8_t public_files_count = 0;
+    size_t all_paths_length = 0;
+    locate_files(public_files_paths, base_path, NULL, 0, &public_files_count, &all_paths_length);
+
+    p_global_arena_raw->current = (char *)p_global_arena_raw->current + all_paths_length;
+    p_global_arena_data->public_files_paths.end_addr = (char *)p_global_arena_raw->current - 1;
+}
+
+void load_static() {
+    Arena *p_global_arena_raw = _p_global_arena_raw;
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+
+    char *statics = (char *)p_global_arena_raw->current;
+    p_global_arena_data->statics.start_addr = p_global_arena_raw->current;
+    char *tmp_statics = statics;
+
+    char *tmp_filepath = p_global_arena_data->public_files_paths.start_addr;
+    char *end = p_global_arena_data->public_files_paths.end_addr;
+    char extension[] = ".html";
+
+    while (tmp_filepath < end) {
+        if (strncmp(tmp_filepath + strlen(tmp_filepath) - strlen(extension), extension, strlen(extension)) == 0) {
+            /** NOT interested in '.html' files */
+
+            tmp_filepath += strlen(tmp_filepath) + 1;
+            continue;
+        }
+
+        char *file_content = NULL;
+        long file_size = 0;
+        read_file(&file_content, &file_size, tmp_filepath);
+
+        /** Static file key */
+        strncpy(tmp_statics, tmp_filepath, strlen(tmp_filepath) + 1);
+        tmp_statics += strlen(tmp_filepath) + 1;
+
+        /** Static file content */
+        strncpy(tmp_statics, file_content, file_size + 1);
+        tmp_statics += file_size + 1;
+
+        free(file_content);
+        file_content = NULL;
+
+        tmp_filepath += strlen(tmp_filepath) + 1;
+    }
+
+    p_global_arena_raw->current = tmp_statics;
+    p_global_arena_data->statics.end_addr = (char *)p_global_arena_raw->current - 1;
+}
+
+void load_html_components() {
+    Arena *p_global_arena_raw = _p_global_arena_raw;
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+
+    /* A Component is an HTML snippet that may include references to other HTML snippets, i.e., it is composable */
+    char *components = (char *)p_global_arena_raw->current;
+    p_global_arena_data->components.start_addr = p_global_arena_raw->current;
+    char *tmp_components = components;
+
+    uint8_t components_count = 0;
+
+    char *tmp_filepath = p_global_arena_data->public_files_paths.start_addr;
+    char *end = p_global_arena_data->public_files_paths.end_addr;
+    char extension[] = ".html";
+
+    while (tmp_filepath < end) {
+        if (strncmp(tmp_filepath + strlen(tmp_filepath) - strlen(extension), extension, strlen(extension)) != 0) {
+            /** Only interested in '.html' files */
+
+            tmp_filepath += strlen(tmp_filepath) + 1;
+            continue;
+        }
+
+        char *file_content = NULL;
+        long file_size = 0;
+        read_file(&file_content, &file_size, tmp_filepath); /** A .html file may contain multiple Components. */
+
+        char *tmp_file_content = file_content;
+        while ((tmp_file_content = strstr(tmp_file_content, COMPONENT_DEFINITION_OPENING_TAG__START)) != NULL) { /** Process Components inside .html file. */
+            char *component_name_start = tmp_file_content + strlen(COMPONENT_DEFINITION_OPENING_TAG__START);
+            char *component_name_end = NULL;
+
+            uint8_t component_name_length = 0;
+
+            if ((component_name_end = strchr(component_name_start, '\"')) != NULL) {
+                component_name_length = component_name_end - component_name_start;
+                strncpy(tmp_components, component_name_start, component_name_length);
+                tmp_components[component_name_length] = '\0';
+                tmp_components += component_name_length + 1;
+            } else {
+                assert(0);
+            }
+
+            char *comp = tmp_components; /** TODO: Make this variable name more descriptive */
+            char *tmp_component_markdown = tmp_file_content + strlen(COMPONENT_DEFINITION_OPENING_TAG__START) + (size_t)component_name_length + strlen(COMPONENT_DEFINITION_OPENING_TAG__END);
+
+            uint8_t skip_whitespace = 0;
+            while (*tmp_component_markdown) { /** Copy component markdown from file to buffer, removing unnecessary spaces. */
+                if (strncmp(tmp_component_markdown, COMPONENT_DEFINITION_CLOSING_TAG, strlen(COMPONENT_DEFINITION_CLOSING_TAG)) == 0) {
+                    break;
+                }
+
+                if (strlen(comp) == 0 && isspace(*tmp_component_markdown)) {
+                    skip_whitespace = 1;
+                    tmp_component_markdown++;
+                    continue;
+                }
+
+                if (*tmp_component_markdown == '>') {
+                    char *temp = tmp_component_markdown - 1;
+                    if (isspace(*temp) && !skip_whitespace) {
+                        uint8_t i = 0;
+                        while (*temp) {
+                            if (!isspace(*temp)) {
+                                skip_whitespace = 1;
+                                tmp_components -= i - 1;
+                                break;
+                            }
+
+                            temp -= 1;
+                            i++;
+                        }
+
+                        continue;
+                    }
+
+                    skip_whitespace = 1;
+                    goto copy_char;
+                }
+
+                if (*tmp_component_markdown == '<') {
+                    char *temp = tmp_component_markdown - 1;
+                    if (isspace(*temp) && /* strlen(tmp_components) > 0 && */ !skip_whitespace) {
+                        uint8_t i = 0;
+                        while (*temp) {
+                            if (!isspace(*temp)) {
+                                skip_whitespace = 1;
+                                tmp_components -= i - 1;
+                                break;
+                            }
+
+                            temp -= 1;
+                            i++;
+                        }
+
+                        continue;
+                    }
+
+                    skip_whitespace = 0;
+                    goto copy_char;
+                }
+
+                if (!skip_whitespace && *tmp_component_markdown == '\n') {
+                    tmp_component_markdown++;
+                    continue;
+                }
+
+                if (skip_whitespace && isspace(*tmp_component_markdown)) {
+                    tmp_component_markdown++;
+                    continue;
+                }
+
+                if (skip_whitespace && !isspace(*tmp_component_markdown)) {
+                    skip_whitespace = 0;
+                    goto copy_char;
+                }
+
+            copy_char:
+                *tmp_components = *tmp_component_markdown;
+                tmp_components++;
+
+                tmp_component_markdown++;
+            }
+
+            tmp_components[0] = '\0';
+            tmp_components++;
+
+            components_count++;
+            tmp_file_content++;
+        }
+
+        free(file_content);
+        file_content = NULL;
+
+        tmp_filepath += strlen(tmp_filepath) + 1;
+    }
+
+    p_global_arena_raw->current = tmp_components;
+    p_global_arena_data->components.end_addr = (char *)p_global_arena_raw->current - 1;
+
+    p_global_arena_data->components_count = components_count;
+}
+
+void resolve_html_components_imports() {
+    uint8_t i;
+
+    Arena *p_global_arena_raw = _p_global_arena_raw;
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+
+    /* An HTML template is essentially a Component that has been compiled with all its imports. */
+    char *html_templates = (char *)p_global_arena_raw->current;
+    p_global_arena_data->html_templates.start_addr = p_global_arena_raw->current;
+
+    char *tmp_html_templates = html_templates;
+
+    char *components = p_global_arena_data->components.start_addr;
+    char *tmp_components = components;
+
+    uint8_t components_count = p_global_arena_data->components_count;
+
+    for (i = 0; i < components_count; i++) { /** Compile Components. */
+        uint8_t html_template_name_length = (uint8_t)strlen(tmp_components);
+        strncpy(tmp_html_templates, tmp_components, html_template_name_length);
+        tmp_html_templates[html_template_name_length] = '\0';
+
+        tmp_html_templates += html_template_name_length + 1;
+
+        tmp_components += strlen(tmp_components) + 1; /* Advance pointer to component markdown */
+
+        size_t component_markdown_length = strlen(tmp_components);
+        strncpy(tmp_html_templates, tmp_components, component_markdown_length);
+        tmp_html_templates[component_markdown_length] = '\0';
+
+        char *template_start = tmp_html_templates;
+
+        char *component_import_opening_tag = tmp_html_templates;
+        while ((component_import_opening_tag = strstr(component_import_opening_tag, COMPONENT_IMPORT_OPENING_TAG__START)) != NULL) { /** Resolve Component imports. */
+            tmp_html_templates += (component_import_opening_tag - tmp_html_templates);
+
+            char *import_name_start = component_import_opening_tag + strlen(COMPONENT_IMPORT_OPENING_TAG__START);
+            char *tmp_import_name = import_name_start;
+
+            uint8_t imported_name_length = 0;
+
+            while (*tmp_import_name) {
+                if (strncmp(tmp_import_name, OPENING_COMPONENT_IMPORT_TAG_SELF_CLOSING_END, strlen(OPENING_COMPONENT_IMPORT_TAG_SELF_CLOSING_END)) == 0) { /** Import doesn't contain "slots" */
+                    imported_name_length = tmp_import_name - import_name_start;
+
+                    char *tmp_components_j = components;
+
+                    uint8_t j;
+                    for (j = 0; j < components_count; j++) {
+                        if (strncmp(tmp_components_j, import_name_start, imported_name_length) == 0) {
+                            tmp_components_j += strlen(tmp_components_j) + 1; /* Advance pointer to component markdown */
+
+                            uint8_t import_statement_length = (uint8_t)strlen(COMPONENT_IMPORT_OPENING_TAG__START) + imported_name_length + (uint8_t)strlen(OPENING_COMPONENT_IMPORT_TAG_SELF_CLOSING_END);
+                            size_t component_markdown_length = strlen(tmp_components_j);
+
+                            size_t len = strlen(tmp_html_templates + import_statement_length);
+                            memmove(tmp_html_templates + component_markdown_length, tmp_html_templates + import_statement_length, len); /* ATTENTION! */
+                            char *ptr = tmp_html_templates + component_markdown_length + len;
+                            ptr[0] = '\0';
+                            ptr++;
+                            while (*ptr) {
+                                size_t str_len = strlen(ptr);
+                                memset(ptr, 0, str_len);
+                                ptr += str_len + 1;
+                            }
+
+                            memcpy(tmp_html_templates, tmp_components_j, component_markdown_length);
+
+                            break; /** We have successfully found the component related to
+                                    * the import and incorporated it into the template. */
+                        }
+
+                        /** This is not the component we are looking for... */
+                        tmp_components_j += strlen(tmp_components_j) + 1; /* Advance past the component name */
+                        tmp_components_j += strlen(tmp_components_j) + 1; /* Advance past the component markdown */
+
+                        if ((j + 1) == components_count) {
+                            printf("didn't find component\n");
+                            assert(0);
+                        }
+                    }
+
+                    /**
+                     * The component we imported may contain additional imports. Reset the pointer to
+                     * the start of the HTML template to check for imports from the beginning again.
+                     */
+                    tmp_html_templates = template_start;
+
+                    break;
+                }
+
+                if (strncmp(tmp_import_name, COMPONENT_IMPORT_OPENING_TAG__END, strlen(COMPONENT_IMPORT_OPENING_TAG__END)) == 0) { /** Import contain "slots" */
+                    imported_name_length = tmp_import_name - import_name_start;
+
+                    char *tmp_components_j = components;
+
+                    uint8_t j;
+                    for (j = 0; j < components_count; j++) {
+                        if (strncmp(tmp_components_j, import_name_start, imported_name_length) == 0) {
+                            tmp_components_j += strlen(tmp_components_j) + 1; /* Advance pointer to component markdown */
+
+                            resolve_slots(tmp_components_j, component_import_opening_tag, &tmp_html_templates);
+
+                            break; /** We have successfully found the component related to
+                                    * the import and incorporated it into the template. */
+                        }
+
+                        tmp_components_j += strlen(tmp_components_j) + 1; /* Advance past the component name */
+                        tmp_components_j += strlen(tmp_components_j) + 1; /* Advance past the component markdown */
+
+                        if ((j + 1) == components_count) {
+                            printf("didn't find component\n");
+                            assert(0);
+                        }
+                    }
+
+                    break;
+                }
+
+                tmp_import_name++;
+            }
+        }
+
+        tmp_components += strlen(tmp_components) + 1; /* Advance pointer to component name */
+        tmp_html_templates += strlen(tmp_html_templates) + 1;
+    }
+
+    p_global_arena_raw->current = tmp_html_templates;
+    p_global_arena_data->html_templates.end_addr = (char *)p_global_arena_raw->current - 1;
+}
+
+SocketInfo *create_server_socket(uint16_t port) {
+    Arena *p_global_arena_raw = _p_global_arena_raw;
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    assert(server_fd != -1);
+
+    int server_fd_flags = fcntl(server_fd, F_GETFL, 0);
+    assert(fcntl(server_fd, F_SETFL, server_fd_flags | O_NONBLOCK) != -1);
+
+    int server_fd_optname = 1;
+    assert(setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &server_fd_optname, sizeof(int)) != -1);
+
+    /** Configure server address */
+    struct sockaddr_in server_addr;
+    server_addr.sin_family = AF_INET;         /** IPv4 */
+    server_addr.sin_port = htons(port);       /** Convert the port number from host byte order to network byte order (big-endian) */
+    server_addr.sin_addr.s_addr = INADDR_ANY; /** Listen on all available network interfaces (IPv4 addresses) */
+
+    assert(bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) != -1);
+
+    assert(listen(server_fd, MAX_CONNECTIONS) != -1);
+
+    SocketInfo *server_socket = arena_alloc(p_global_arena_raw, sizeof(SocketInfo));
+    server_socket->fd = server_fd;
+    server_socket->type = SERVER_SOCKET;
+
+    p_global_arena_data->socket = server_socket;
+
+    return p_global_arena_data->socket;
+}
+
+void create_connection_pool(int server_fd) {
+    uint8_t i;
+
+    Arena *p_global_arena_raw = _p_global_arena_raw;
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+
+    for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
+        int db_fd = socket(AF_INET, SOCK_STREAM, 0);
+        assert(db_fd != -1);
+
+        int db_fd_flags = fcntl(server_fd, F_GETFL, 0);
+        assert(fcntl(db_fd, F_SETFL, db_fd_flags | O_NONBLOCK) != -1);
+
+        int db_fd_optname = 1;
+        assert(setsockopt(db_fd, SOL_SOCKET, SO_REUSEADDR, &db_fd_optname, sizeof(int)) != -1);
+
+        struct sockaddr_in db_addr;
+        db_addr.sin_family = AF_INET;
+        db_addr.sin_port = htons(string_to_uint16(get_value("DB_PORT", p_global_arena_data->env)));
+
+        memset(&db_addr.sin_zero, 0, sizeof(db_addr.sin_zero));
+        assert(inet_pton(AF_INET, get_value("DB_HOST", p_global_arena_data->env), &db_addr.sin_addr) > 0);
+
+        if (connect(db_fd, (struct sockaddr *)&db_addr, sizeof(db_addr)) < 0) {
+            assert(errno == EINPROGRESS);
+        }
+
+        connection_pool[i].socket.fd = db_fd;
+        connection_pool[i].socket.type = DB_SOCKET;
+        connection_pool[i].index = i;
+
+        event.events = EPOLLOUT | EPOLLET;
+        event.data.ptr = &(connection_pool[i]);
+        assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, connection_pool[i].socket.fd, &event) != -1);
+    }
+
+    uint8_t *connection_msg = (uint8_t *)p_global_arena_raw->current;
+    p_global_arena_data->connection_msg.start_addr = p_global_arena_raw->current;
+    uint8_t *tmp_connection_msg = connection_msg;
+
+    /** Leave space at the very beginning for msg_length */
+    tmp_connection_msg += sizeof(u_int32_t);
+
+    u_int32_t protocol_version = htonl(0x00030000); /** version 3.0 */
+    memcpy(tmp_connection_msg, &protocol_version, sizeof(protocol_version));
+    tmp_connection_msg += sizeof(protocol_version);
+
+    memcpy(tmp_connection_msg, "user", sizeof("user"));
+    tmp_connection_msg += sizeof("user");
+
+    char *user = get_value("DB_USER", p_global_arena_data->env);
+    memcpy(tmp_connection_msg, user, strlen(user));
+    tmp_connection_msg += strlen(user);
+    *tmp_connection_msg = '\0';
+    tmp_connection_msg++;
+
+    memcpy(tmp_connection_msg, "database", sizeof("database"));
+    tmp_connection_msg += sizeof("database");
+
+    char *database = get_value("DB_NAME", p_global_arena_data->env);
+    memcpy(tmp_connection_msg, database, strlen(database));
+    tmp_connection_msg += strlen(database);
+    *tmp_connection_msg = '\0';
+    tmp_connection_msg++;
+
+    *tmp_connection_msg = '\0';
+    tmp_connection_msg++;
+
+    size_t connection_msg_size = tmp_connection_msg - connection_msg;
+    u_int32_t msg_length = htonl((u_int32_t)connection_msg_size);
+    memcpy(connection_msg, &msg_length, sizeof(msg_length));
+
+    p_global_arena_raw->current = tmp_connection_msg;
+    p_global_arena_data->connection_msg.end_addr = (uint8_t *)p_global_arena_raw->current - 1;
+
+    int count = 0;
+    while (count < CONNECTION_POOL_SIZE) {
+        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, BLOCK_EXECUTION);
+        assert(nfds != -1);
+
+        for (i = 0; i < nfds; i++) {
+            SocketInfo *socket_info = (SocketInfo *)events[i].data.ptr;
+
+            if (socket_info->type == DB_SOCKET) {
+                if (events[i].events & EPOLLOUT) {
+                    ssize_t bytes_sent = send(socket_info->fd, connection_msg, connection_msg_size, 0);
+                    if (bytes_sent == -1 && errno == EAGAIN) {
+                        /* If send buffer is full, try again later */
+                        continue;
+                    }
+
+                    event.events = EPOLLIN | EPOLLET;
+                    event.data.ptr = socket_info;
+                    assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, socket_info->fd, &event) >= 0);
+                } else if (events[i].events & EPOLLIN) {
+                    char db_connection_response[KB(1)];
+                    memset(db_connection_response, 0, sizeof(db_connection_response));
+
+                    char *tmp_response = db_connection_response;
+                    ssize_t read_stream = 0;
+
+                    while (1) {
+                        char *ptr = tmp_response + read_stream;
+
+                        ssize_t incomming_stream_size = recv(socket_info->fd, ptr, sizeof(db_connection_response) - read_stream, 0);
+                        if (incomming_stream_size == -1) {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                break;
+                            }
+                        }
+
+                        if (incomming_stream_size == 0) {
+                            printf("Postgres server closed connection\n");
+
+                            break;
+                        }
+
+                        read_stream += incomming_stream_size;
+
+                        if (incomming_stream_size <= 0) {
+                            break;
+                        }
+
+                        assert(read_stream < (ssize_t)sizeof(db_connection_response));
+                    }
+
+                    if (read_stream > 0) {
+                        connection_pool[count].alive = 1;
+                        count++;
+                    }
+
+                    /** TODO: Instead of printing raw bytes, decode to data structure. */
+                    ssize_t j;
+                    for (j = 0; j < read_stream; j++) {
+                        printf("%c", (unsigned char)db_connection_response[j]);
+                        if (j == read_stream - 1) {
+                            printf("\n");
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

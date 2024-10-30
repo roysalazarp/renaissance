@@ -23,7 +23,7 @@
             "src": "https://chefcasa.s3.eu-north-1.amazonaws.com/app/android/android-launchericon-144-144.png",
             "sizes": "144x144",
             "type": "image/png",
-            "purpose": "maskable"
+            "purpose": "any"
         },
         {
             "src": "https://chefcasa.s3.eu-north-1.amazonaws.com/app/android/android-launchericon-96-96.png",
