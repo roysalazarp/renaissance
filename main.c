@@ -116,14 +116,14 @@ typedef struct {
 
 void sigint_handler(int signo);
 void router(Arena *scratch_arena_raw);
-void sign_up_create_user_post(int client_socket);
-void sign_up_get(int client_socket);
+void sign_up_create_user_post(Arena *scratch_arena_raw);
+void sign_up_get(Arena *scratch_arena_raw);
 void styles_get(Arena *scratch_arena_raw);
 void manifest_get(Arena *scratch_arena_raw);
 void home_get(Arena *scratch_arena_raw);
 void not_found(int client_socket);
 void locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
-void url_decode(char **string);
+size_t url_decode_utf8(char **string, size_t length);
 char hex_to_char(char c);
 Arena *arena_init(size_t size);
 void *arena_alloc(Arena *arena, size_t size);
@@ -141,6 +141,8 @@ void resolve_html_components_imports();
 SocketInfo *create_server_socket(uint16_t port);
 void create_connection_pool(int server_fd);
 void get_public_files_path();
+CharsBlock parse_body_value(const char key_name[], char *request_body);
+char *find_body(CharsBlock request);
 
 volatile sig_atomic_t keep_running = 1;
 
@@ -356,9 +358,12 @@ void router(Arena *scratch_arena_raw) {
         if (incomming_stream_size == -1) {
             printf("Error: %s\n", strerror(errno));
 
-            assert(0);
-
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (read_stream > 0) {
+                    break;
+                }
+
+                longjmp(ctx, 1); /* ?? */
             }
         }
 
@@ -367,6 +372,11 @@ void router(Arena *scratch_arena_raw) {
             printf("fd %d - Empty request\n", client_socket);
             return;
         }
+
+        /** decode */
+        /*
+        incomming_stream_size = (ssize_t)url_decode_utf8(&advanced_request_ptr, (size_t)incomming_stream_size);
+        */
 
         read_stream += incomming_stream_size;
 
@@ -459,13 +469,13 @@ void router(Arena *scratch_arena_raw) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
             home_get(scratch_arena_raw);
         }
-    } else if (strncmp(url.start_addr, "/sign-up", strlen("/sign-up")) == 0) {
+    } else if (strncmp(url.start_addr, "/sign-up ", strlen("/sign-up ")) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            sign_up_get(client_socket);
+            sign_up_get(scratch_arena_raw);
         }
-    } else if (strncmp(url.start_addr, "/sign-up/create-user", strlen("/sign-up/create-user")) == 0) {
+    } else if (strncmp(url.start_addr, "/sign-up/create-user ", strlen("/sign-up/create-user ")) == 0) {
         if (strncmp(method.start_addr, "POST", method.length) == 0) {
-            sign_up_create_user_post(client_socket);
+            sign_up_create_user_post(scratch_arena_raw);
         }
     } else {
         not_found(client_socket);
@@ -579,7 +589,154 @@ void resolve_slots(char *component_markdown, char *import_statement, char **temp
     resolve_slots(component_markdown, template_closing_tag, templates);
 }
 
-void sign_up_create_user_post(int client_socket) {
+typedef struct __attribute__((packed)) {
+    /* Parse message */
+    char parse_msg_type;
+    uint32_t parse_msg_length;
+    char parse_unnamed_statement;
+    char command[53]; /* "SELECT * FROM app.countries WHERE id = $1 OR id = $2" */
+    uint16_t nParams_for_paramTypes;
+    uint32_t paramType_01;
+    uint32_t paramType_02;
+
+    /* Bind message */
+    char bind_msg_type;
+    uint32_t bind_msg_length;
+    char bind_unnamed_portal;
+    char bind_unnamed_statement;
+
+    uint16_t nParams_for_paramFormats;
+    uint16_t paramFormat_01;
+    uint16_t paramFormat_02;
+
+    uint16_t nParams_for_paramValues;
+    uint32_t paramValuesSize_01;
+    int paramValues_01;
+    uint32_t paramValuesSize_02;
+    int paramValues_02;
+
+    uint16_t num_1;
+    uint16_t result_format;
+
+    /* Describe Portal message */
+    char describe_portal_msg_type;
+    uint32_t describe_portal_msg_length;
+    char P;
+    char describe_portal_empty_string;
+
+    /* Execute message */
+    char execute_msg_type;
+    uint32_t execute_msg_length;
+    char execute_empty_string;
+    uint32_t num_0;
+
+    /* Sync message */
+    char sync_msg_type;
+    uint32_t sync_msg_length;
+} SelectTwoCountriesQuery;
+
+SelectTwoCountriesQuery select_two_countries_query() {
+    SelectTwoCountriesQuery query = {0};
+
+    /* Parse message */
+    query.parse_msg_type = 'P';
+    /* clang-format off */
+    query.parse_msg_length = htonl(sizeof(query.parse_msg_length) 
+                                 + sizeof(query.parse_unnamed_statement) 
+                                 + 53 
+                                 + sizeof(query.nParams_for_paramTypes) 
+                                 + sizeof(query.paramType_01) 
+                                 + sizeof(query.paramType_02));
+    /* clang-format on */
+    query.parse_unnamed_statement = (char)0;
+    memcpy(query.command, "SELECT * FROM app.countries WHERE id = $1 OR id = $2", 53);
+    query.nParams_for_paramTypes = htons((uint16_t)2);
+    query.paramType_01 = htonl((uint32_t)23);
+    query.paramType_02 = htonl((uint32_t)23);
+
+    /* Bind message */
+    query.bind_msg_type = 'B';
+    /* clang-format off */
+    query.bind_msg_length = htonl(sizeof(query.bind_msg_length) 
+                                + sizeof(query.bind_unnamed_portal) 
+                                + sizeof(query.bind_unnamed_statement) 
+                                + sizeof(query.nParams_for_paramFormats) 
+                                + sizeof(query.paramFormat_01) 
+                                + sizeof(query.paramFormat_02) 
+                                + sizeof(query.nParams_for_paramValues) 
+                                + sizeof(query.paramValuesSize_01) 
+                                + sizeof(query.paramValues_01) 
+                                + sizeof(query.paramValuesSize_02) 
+                                + sizeof(query.paramValues_02) 
+                                + sizeof(query.num_1) 
+                                + sizeof(query.result_format));
+    /* clang-format on */
+    query.bind_unnamed_portal = (char)0;
+    query.bind_unnamed_statement = (char)0;
+
+    query.nParams_for_paramFormats = htons((uint16_t)2);
+    query.paramFormat_01 = htons((uint16_t)1);
+    query.paramFormat_02 = htons((uint16_t)1);
+
+    query.nParams_for_paramValues = htons((uint16_t)2);
+    query.paramValuesSize_01 = htonl((uint32_t)4);
+    query.paramValues_01 = htonl((int)3);
+    query.paramValuesSize_02 = htonl((uint32_t)4);
+    query.paramValues_02 = htonl((int)23);
+
+    query.num_1 = htons((uint16_t)1);
+    query.result_format = htons((uint16_t)0);
+
+    /* Describe Portal message */
+    query.describe_portal_msg_type = 'D';
+    /* clang-format off */
+    query.describe_portal_msg_length = htonl(sizeof(query.describe_portal_msg_length) 
+                                           + sizeof(query.P) 
+                                           + sizeof(query.describe_portal_empty_string));
+    /* clang-format on */
+    query.P = 'P';
+    query.describe_portal_empty_string = (char)0;
+
+    /* Execute message */
+    query.execute_msg_type = 'E';
+    /* clang-format off */
+    query.execute_msg_length = htonl(sizeof(uint32_t) 
+                                   + sizeof(query.execute_empty_string) 
+                                   + sizeof(uint32_t));
+    /* clang-format on */
+    query.execute_empty_string = (char)0;
+    query.num_0 = htonl((uint32_t)0);
+
+    /* Sync message */
+    query.sync_msg_type = 'S';
+    query.sync_msg_length = htonl(sizeof(uint32_t));
+
+    return query;
+}
+
+void sign_up_create_user_post(Arena *scratch_arena_raw) {
+    /** Process signup */
+
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+
+    char *body = find_body(scratch_arena_data->request);
+
+    CharsBlock email = parse_body_value("email", body);
+    CharsBlock password = parse_body_value("password", body);
+    CharsBlock repeat_password = parse_body_value("repeat_password", body);
+
+    printf("%s\n", body);
+
+    printf("%.*s\n", (int)(email.end_addr - email.start_addr), email.start_addr);
+    /** TODO: Validate whether email satisfies required format */
+    /** TODO: Validate whether email already exists in the db */
+
+    printf("%.*s\n", (int)(password.end_addr - password.start_addr), password.start_addr);
+    printf("%.*s\n", (int)(repeat_password.end_addr - repeat_password.start_addr), repeat_password.start_addr);
+
+    int client_socket = scratch_arena_data->client_socket;
+
     char response[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
 
     if (send(client_socket, response, strlen(response), 0) == -1) {
@@ -589,14 +746,80 @@ void sign_up_create_user_post(int client_socket) {
     close(client_socket);
 }
 
-void sign_up_get(int client_socket) {
-    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+char *find_body(CharsBlock request) {
+    char *body = request.start_addr;
 
-    if (send(client_socket, response_headers, strlen(response_headers), 0) == -1) {
+    while (body < request.end_addr) {
+        char header_headers_end[] = "\r\n\r\n";
+        if (strncmp(body, header_headers_end, strlen(header_headers_end)) == 0) {
+            body += strlen(header_headers_end);
+
+            break;
+        }
+
+        body++;
+    }
+
+    return body;
+}
+
+CharsBlock parse_body_value(const char key_name[], char *request_body) {
+    CharsBlock value = {0};
+    value.start_addr = request_body;
+
+    char *p = request_body;
+    char *end = request_body + strlen(request_body) + 1;
+
+    while (value.start_addr < end) {
+        if (strncmp(value.start_addr, key_name, strlen(key_name)) == 0) {
+            char *passed_key = value.start_addr + strlen(key_name);
+
+            if (passed_key[0] == '=') {
+                passed_key++;
+                value.start_addr = passed_key;
+                break;
+            }
+        }
+
+        value.start_addr++;
+    }
+
+    value.end_addr = value.start_addr;
+
+    while (value.end_addr < end) {
+        if (value.end_addr[0] == '&' || value.end_addr[0] == '\0') {
+            break;
+        }
+
+        value.end_addr++;
+    }
+
+    return value;
+}
+
+void sign_up_get(Arena *scratch_arena_raw) {
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+
+    int client_socket = scratch_arena_data->client_socket;
+
+    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+    char *template = get_value("sign-up", p_global_arena_data->html_templates);
+
+    size_t response_length = strlen(response_headers) + strlen(template);
+
+    char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
+
+    sprintf(response, "%s%s", response_headers, template);
+    response[response_length] = '\0';
+
+    if (send(client_socket, response, strlen(response), 0) == -1) {
         /** TODO: Write error to logs */
     }
 
     close(client_socket);
+
+    arena_free(scratch_arena_raw);
 }
 
 void styles_get(Arena *scratch_arena_raw) {
@@ -703,8 +926,10 @@ void home_get(Arena *scratch_arena_raw) {
 
     assert(conn != NULL);
 
+    SelectTwoCountriesQuery my_query = select_two_countries_query();
+
     char message_type = 'Q';
-    char users_id_query_local[] = "SELECT id FROM app.users;";
+    char users_id_query_local[] = "SELECT id FROM app.users";
     int32_t message_length = htonl((int32_t)(sizeof(users_id_query_local)) + (int32_t)(sizeof(int32_t)));
     size_t users_id_query_length = sizeof(char) + sizeof(int32_t) + (strlen(users_id_query_local) + 1);
 
@@ -717,7 +942,10 @@ void home_get(Arena *scratch_arena_raw) {
     local->users_id_query.end_addr = users_id_query + users_id_query_length;
 
     size_t msg_length = local->users_id_query.end_addr - local->users_id_query.start_addr;
+    /*
     ssize_t bytes_sent = send(conn->socket.fd, local->users_id_query.start_addr, msg_length, 0);
+    */
+    ssize_t bytes_sent = send(conn->socket.fd, &my_query, sizeof(my_query), 0);
     if (bytes_sent == -1) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             /** ? */
@@ -826,13 +1054,14 @@ void not_found(int client_socket) {
     close(client_socket);
 }
 
-void url_decode(char **string) {
+size_t url_decode_utf8(char **string, size_t length) {
     char *out = *string;
-    size_t len = strlen(*string);
+
+    size_t new_len = 0;
 
     size_t i;
-    for (i = 0; i < len; i++) {
-        if ((*string)[i] == '%' && i + 2 < len && isxdigit((*string)[i + 1]) && isxdigit((*string)[i + 2])) {
+    for (i = 0; i < length; i++) {
+        if ((*string)[i] == '%' && i + 2 < length && isxdigit((*string)[i + 1]) && isxdigit((*string)[i + 2])) {
             char c = hex_to_char((*string)[i + 1]) * 16 + hex_to_char((*string)[i + 2]);
             *out++ = c;
             i += 2;
@@ -841,9 +1070,13 @@ void url_decode(char **string) {
         } else {
             *out++ = (*string)[i];
         }
+
+        new_len++;
     }
 
-    *out = '\0';
+    memset(out, 0, length - new_len);
+
+    return new_len;
 }
 
 char hex_to_char(char c) {

@@ -1,0 +1,30 @@
+<x-component-def name="sign-up">
+    <!DOCTYPE html>
+    <html lang="en">
+        <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <script src="https://unpkg.com/htmx.org@1.9.10" integrity="sha384-D1Kt99CQMDuVetoL1lrYwg5t+9QdHe7NLX/SoJYkXDFfX37iInKRy5xLSi8nO7UC" crossorigin="anonymous"></script>
+            <!-- <link rel="stylesheet" href="sign_up.css" /> -->
+            <title>Sign-up</title>
+        </head>
+        <body>
+            <h1>Sign-up</h1>
+            <form hx-post="/sign-up/create-user" hx-swap="none">
+                <div class="form-input">
+                    <label for="email">Email</label>
+                    <input type="text" placeholder="Enter Email" name="email" required />
+                </div>
+                <div class="form-input">
+                    <label for="password">Password</label>
+                    <input type="password" placeholder="Enter Password" name="password" required />
+                </div>
+                <div class="form-input">
+                    <label for="repeat_password">Repeat Password</label>
+                    <input type="password" placeholder="Repeat Password" name="repeat_password" required />
+                </div>
+                <button type="submit">Sign Up</button>
+            </form>
+        </body>
+    </html>
+</x-component-def>
