@@ -4,6 +4,14 @@
     "explorer.compactFolders": false,
     "files.associations": {
         "types.h": "c",
-        "type_traits": "c"
+        "type_traits": "c",
+        "libpq-fe.h": "c",
+        "array": "c",
+        "compare": "c",
+        "functional": "c",
+        "ostream": "c",
+        "ranges": "c",
+        "tuple": "c",
+        "utility": "c"
     }
 }

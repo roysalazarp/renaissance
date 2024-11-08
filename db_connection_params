@@ -1,0 +1,4 @@
+host=localhost
+dbname=renaissance
+user=renaissance_app
+password=password

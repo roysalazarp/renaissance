@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libpq-fe.h>
 #include <linux/limits.h>
 #include <netinet/in.h>
 #include <setjmp.h>
@@ -50,8 +51,8 @@
 typedef enum { SERVER_SOCKET, CLIENT_SOCKET, DB_SOCKET } FDType;
 
 typedef struct {
-    int fd;
     FDType type;
+    int fd;
 } SocketInfo;
 
 typedef struct {
@@ -77,6 +78,7 @@ typedef struct {
 
 typedef struct {
     Arena *arena;
+    char *load_db_connection_string;
     CharsBlock env;
     CharsBlock public_files_paths;
     CharsBlock statics;
@@ -99,14 +101,20 @@ typedef struct {
     Arena *scratch_arena_raw;
     ScratchArenaDataLookup *scratch_arena_data;
     jmp_buf jmp_buf;
+    uint8_t queued;
 } Client;
 
 typedef struct {
-    SocketInfo socket;
+    FDType type;
+    PGconn *conn;
     uint8_t index;
     Client client;
     uint8_t alive;
-} Connection;
+} DBConnection;
+typedef struct {
+    uint8_t index;
+    Client client;
+} QueuedRequest;
 
 typedef struct {
     MemBlock users_id_query;
@@ -134,15 +142,17 @@ void resolve_slots(char *component_markdown, char *import_statement, char **temp
 char *get_value(const char key[], CharsBlock block);
 RequestValue find_http_request_value(const char key[], char *request);
 uint16_t string_to_uint16(const char *str);
+char *load_db_connection_string(const char *filepath);
 void load_env_variables();
 void load_static();
 void load_html_components();
 void resolve_html_components_imports();
 SocketInfo *create_server_socket(uint16_t port);
-void create_connection_pool(int server_fd);
+void create_connection_pool(const char *conninfo);
 void get_public_files_path();
 CharsBlock parse_body_value(const char key_name[], char *request_body);
 char *find_body(CharsBlock request);
+void print_query_result(PGresult *query_result);
 
 volatile sig_atomic_t keep_running = 1;
 
@@ -157,16 +167,18 @@ struct epoll_event event;
 #define to_index(i) (i + 1)
 #define from_index(i) (i - 1)
 
-Connection connection_pool[CONNECTION_POOL_SIZE];
+DBConnection connection_pool[CONNECTION_POOL_SIZE];
+QueuedRequest queue[MAX_CONNECTIONS];
 
 jmp_buf ctx;
+jmp_buf db_ctx;
 
 int h_count;
 
 int main() {
     int retval = 0;
 
-    uint8_t i;
+    int i;
 
     _p_global_arena_raw = arena_init(PAGE_SIZE * 20);
 
@@ -181,6 +193,8 @@ int main() {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     p_global_arena_data->arena = p_global_arena_raw;
+
+    char *connection_string = load_db_connection_string("./db_connection_params");
 
     load_env_variables();
     get_public_files_path();
@@ -207,7 +221,7 @@ int main() {
 
     printf("Server listening on port: %d...\n", port);
 
-    create_connection_pool(server_fd);
+    create_connection_pool(connection_string);
 
     struct sockaddr_in client_addr; /** Why is this needed ?? */
     socklen_t client_addr_len = sizeof(client_addr);
@@ -272,17 +286,40 @@ int main() {
 
                 case DB_SOCKET: {
                     if (events[i].events & EPOLLIN) { /** DB socket (aka connection) ready for read */
-                        Connection *db_socket = (Connection *)socket_info;
+                        DBConnection *connection = (DBConnection *)socket_info;
 
                         /** The connection should belong to a client fd (aka request) */
-                        assert(db_socket->client.fd != 0);
+                        assert(connection->client.fd != 0);
 
                         /** Go back to where you attempted to read the result of a
                          * query but jumped out since we are not supposed to wait
                          * for response to be ready. Pass index to restore request
                          * state through connection pool */
-                        longjmp(db_socket->client.jmp_buf, to_index(db_socket->index));
+                        longjmp(connection->client.jmp_buf, to_index(connection->index));
                     } else if (events[i].events & EPOLLOUT) { /** DB socket (aka connection) is ready for write */
+                        DBConnection *connection = (DBConnection *)socket_info;
+
+                        QueuedRequest *request = NULL;
+
+                        int j;
+                        for (j = 0; j < MAX_CONNECTIONS; j++) {
+                            if (queue[j].client.fd != 0) {
+                                /** First in the queue waiting for connection */
+                                request = &(queue[j]);
+
+                                break;
+                            }
+                        }
+
+                        if (request) {
+                            connection->client = request->client;
+                            memset(&(request->client), 0, sizeof(Client));
+
+                            if (setjmp(db_ctx) == 0) {
+                                longjmp(connection->client.jmp_buf /* This will jump to queue find loop */, to_index(connection->index));
+                            }
+                        }
+
                         /** We don't do anything here since the connection pool
                          * already only allow us to use free connections (aka db sockets ready for write) */
                     }
@@ -908,7 +945,7 @@ void home_get(Arena *scratch_arena_raw) {
 
     HomeGetContext *local = scratch_arena_data->local;
 
-    Connection *conn;
+    DBConnection *connection;
 
     int i;
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
@@ -918,94 +955,108 @@ void home_get(Arena *scratch_arena_raw) {
             connection_pool[i].client.scratch_arena_raw = scratch_arena_raw;
             connection_pool[i].client.scratch_arena_data = scratch_arena_data;
 
-            conn = &(connection_pool[i]);
+            connection = &(connection_pool[i]);
 
             break;
         }
-    }
 
-    assert(conn != NULL);
+        if (i + 1 == CONNECTION_POOL_SIZE) {
+            int j;
+            for (j = 0; j < MAX_CONNECTIONS; j++) {
+                if (queue[j].client.fd == 0) {
+                    /* Available spot in the queue */
 
-    SelectTwoCountriesQuery my_query = select_two_countries_query();
+                    queue[j].client.fd = scratch_arena_data->client_socket;
+                    queue[j].client.scratch_arena_raw = scratch_arena_raw;
+                    queue[j].client.scratch_arena_data = scratch_arena_data;
+                    queue[j].client.queued = 1;
 
-    char message_type = 'Q';
-    char users_id_query_local[] = "SELECT id FROM app.users";
-    int32_t message_length = htonl((int32_t)(sizeof(users_id_query_local)) + (int32_t)(sizeof(int32_t)));
-    size_t users_id_query_length = sizeof(char) + sizeof(int32_t) + (strlen(users_id_query_local) + 1);
+                    int r = setjmp(queue[j].client.jmp_buf);
+                    if (r == 0) {
+                        longjmp(ctx, 1);
+                    }
 
-    uint8_t *users_id_query = arena_alloc(scratch_arena_raw, users_id_query_length);
-    memcpy(users_id_query, &message_type, sizeof(char));
-    memcpy(users_id_query + sizeof(char), &message_length, sizeof(int32_t));
-    memcpy(users_id_query + sizeof(char) + sizeof(int32_t), &users_id_query_local, (strlen(users_id_query_local) + 1));
+                    int index = from_index(r);
 
-    local->users_id_query.start_addr = users_id_query;
-    local->users_id_query.end_addr = users_id_query + users_id_query_length;
+                    scratch_arena_data = connection_pool[index].client.scratch_arena_data;
+                    scratch_arena_raw = scratch_arena_data->arena;
 
-    size_t msg_length = local->users_id_query.end_addr - local->users_id_query.start_addr;
-    /*
-    ssize_t bytes_sent = send(conn->socket.fd, local->users_id_query.start_addr, msg_length, 0);
-    */
-    ssize_t bytes_sent = send(conn->socket.fd, &my_query, sizeof(my_query), 0);
-    if (bytes_sent == -1) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            /** ? */
-            printf("here!?\n");
-        }
-    }
+                    local = scratch_arena_data->local;
+                    connection = &(connection_pool[index]);
 
-retry:
-    local->users_id_query_response.start_addr = (uint8_t *)scratch_arena_raw->current;
-    ssize_t read_stream = 0;
-    while (1) {
-        uint8_t *ptr = local->users_id_query_response.start_addr + read_stream;
-
-        ssize_t incomming_stream_size = recv(conn->socket.fd, ptr, KB(1) - read_stream, 0);
-        if (incomming_stream_size == -1) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                event.events = EPOLLIN | EPOLLET;
-                event.data.ptr = &(conn->socket);
-                epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->socket.fd, &event);
-
-                int r = setjmp(conn->client.jmp_buf);
-                if (r == 0) {
-                    longjmp(ctx, 1);
+                    break;
                 }
-
-                int index = from_index(r);
-
-                scratch_arena_data = connection_pool[index].client.scratch_arena_data;
-                scratch_arena_raw = scratch_arena_data->arena;
-
-                local = scratch_arena_data->local;
-                conn = &(connection_pool[index]);
-
-                goto retry;
             }
+
+            assert(connection->client.fd != 0);
+        }
+    }
+
+    assert(connection != NULL);
+
+    const char *command = "SELECT * FROM app.countries WHERE id = $1 OR id = $2";
+    Oid paramTypes[2] = {23, 23};
+    int id1 = htonl(3);
+    int id2 = htonl(23);
+    const char *paramValues[2];
+    paramValues[0] = (char *)&id1;
+    paramValues[1] = (char *)&id2;
+    int paramLengths[2] = {sizeof(id1), sizeof(id2)};
+    int paramFormats[2] = {1, 1};
+    int resultFormat = 0;
+
+    PostgresPollingStatusType poll_status = PQconnectPoll(connection->conn);
+
+    if (PQsendQueryParams(connection->conn, command, 2, paramTypes, paramValues, paramLengths, paramFormats, resultFormat) == 0) {
+        fprintf(stderr, "Query failed to send: %s\n", PQerrorMessage(connection->conn));
+        assert(0);
+    }
+
+    int _conn_fd = PQsocket(connection->conn);
+
+    event.events = EPOLLIN | EPOLLET;
+    event.data.ptr = connection;
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, _conn_fd, &event);
+
+    int index;
+
+    if (connection->client.queued) {
+        int r = setjmp(connection->client.jmp_buf);
+        if (r == 0) {
+            longjmp(db_ctx, 1);
         }
 
-        if (incomming_stream_size == 0) {
-            printf("Postgres server closed connection\n");
+        index = from_index(r);
+    } else {
+        int r = setjmp(connection->client.jmp_buf);
+        if (r == 0) {
+            longjmp(ctx, 1);
+        }
 
+        index = from_index(r);
+    }
+
+    scratch_arena_data = connection_pool[index].client.scratch_arena_data;
+    scratch_arena_raw = scratch_arena_data->arena;
+
+    local = scratch_arena_data->local;
+    connection = &(connection_pool[index]);
+
+    if (PQconsumeInput(connection->conn) == 0) {
+        fprintf(stderr, "PQconsumeInput failed: %s", PQerrorMessage(connection->conn));
+    }
+
+    PGresult *res;
+    while ((res = PQgetResult(connection->conn)) != NULL) {
+        if (PQresultStatus(res) != PGRES_TUPLES_OK && PQresultStatus(res) != PGRES_COMMAND_OK) {
+            fprintf(stderr, "Query failed: %s", PQerrorMessage(connection->conn));
+            PQclear(res);
             break;
         }
 
-        read_stream += incomming_stream_size;
+        print_query_result(res);
 
-        if (incomming_stream_size <= 0) {
-            break;
-        }
-
-        local->users_id_query_response.end_addr = local->users_id_query_response.start_addr + read_stream;
-
-        ssize_t j;
-        for (j = 0; j < read_stream; j++) {
-            printf("%c", (unsigned char)local->users_id_query_response.start_addr[j]);
-            if (j == read_stream - 1) {
-                printf("\n");
-            }
-        }
-
-        break;
+        PQclear(res);
     }
 
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -1031,16 +1082,24 @@ retry:
     h_count++;
     printf("Handled requests: %d\n", h_count);
 
+    uint8_t was_queued = connection->client.queued;
+
     /* release connection for others to use */
-    memset(&(conn->client), 0, sizeof(Client));
+    memset(&(connection->client), 0, sizeof(Client));
+
+    int conn_fd = PQsocket(connection->conn);
 
     event.events = EPOLLOUT | EPOLLET;
-    event.data.ptr = &(conn->socket);
-    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->socket.fd, &event);
+    event.data.ptr = connection;
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_fd, &event);
 
     arena_free(scratch_arena_raw);
 
-    longjmp(ctx, 1); /** Jump back */
+    if (was_queued) {
+        longjmp(db_ctx, 1); /** Jump back */
+    } else {
+        longjmp(ctx, 1); /** Jump back */
+    }
 }
 
 void not_found(int client_socket) {
@@ -1306,6 +1365,26 @@ void sigint_handler(int signo) {
         printf("\nReceived SIGINT, exiting program...\n");
         keep_running = 0;
     }
+}
+
+char *load_db_connection_string(const char *filepath) {
+    Arena *p_global_arena_raw = _p_global_arena_raw;
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+
+    char *file_content = NULL;
+    long file_size = 0;
+    read_file(&file_content, &file_size, filepath);
+
+    char *connection_string = (char *)arena_alloc(p_global_arena_raw, (size_t)file_size + 1);
+    memcpy(connection_string, file_content, (size_t)file_size);
+    connection_string[file_size] = '\0';
+
+    p_global_arena_data->load_db_connection_string = connection_string;
+
+    free(file_content);
+    file_content = NULL;
+
+    return connection_string;
 }
 
 void load_env_variables() {
@@ -1815,80 +1894,25 @@ SocketInfo *create_server_socket(uint16_t port) {
     return p_global_arena_data->socket;
 }
 
-void create_connection_pool(int server_fd) {
+void create_connection_pool(const char *conninfo) {
     uint8_t i;
-
-    Arena *p_global_arena_raw = _p_global_arena_raw;
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
-
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
-        int db_fd = socket(AF_INET, SOCK_STREAM, 0);
-        assert(db_fd != -1);
+        connection_pool[i].conn = PQconnectStart(conninfo);
+        if (PQstatus(connection_pool[i].conn) != CONNECTION_BAD) {
+            PQsetnonblocking(connection_pool[i].conn, 1);
 
-        int db_fd_flags = fcntl(server_fd, F_GETFL, 0);
-        assert(fcntl(db_fd, F_SETFL, db_fd_flags | O_NONBLOCK) != -1);
+            connection_pool[i].type = DB_SOCKET;
+            connection_pool[i].index = i;
 
-        int db_fd_optname = 1;
-        assert(setsockopt(db_fd, SOL_SOCKET, SO_REUSEADDR, &db_fd_optname, sizeof(int)) != -1);
+            int fd = PQsocket(connection_pool[i].conn);
 
-        struct sockaddr_in db_addr;
-        db_addr.sin_family = AF_INET;
-        db_addr.sin_port = htons(string_to_uint16(get_value("DB_PORT", p_global_arena_data->env)));
-
-        memset(&db_addr.sin_zero, 0, sizeof(db_addr.sin_zero));
-        assert(inet_pton(AF_INET, get_value("DB_HOST", p_global_arena_data->env), &db_addr.sin_addr) > 0);
-
-        if (connect(db_fd, (struct sockaddr *)&db_addr, sizeof(db_addr)) < 0) {
-            assert(errno == EINPROGRESS);
+            event.events = EPOLLOUT | EPOLLET;
+            event.data.ptr = &(connection_pool[i]);
+            assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event) != -1);
+        } else {
+            fprintf(stderr, "Connection failed: %s\n", PQerrorMessage(connection_pool[i].conn));
         }
-
-        connection_pool[i].socket.fd = db_fd;
-        connection_pool[i].socket.type = DB_SOCKET;
-        connection_pool[i].index = i;
-
-        event.events = EPOLLOUT | EPOLLET;
-        event.data.ptr = &(connection_pool[i]);
-        assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, connection_pool[i].socket.fd, &event) != -1);
     }
-
-    uint8_t *connection_msg = (uint8_t *)p_global_arena_raw->current;
-    p_global_arena_data->connection_msg.start_addr = p_global_arena_raw->current;
-    uint8_t *tmp_connection_msg = connection_msg;
-
-    /** Leave space at the very beginning for msg_length */
-    tmp_connection_msg += sizeof(u_int32_t);
-
-    u_int32_t protocol_version = htonl(0x00030000); /** version 3.0 */
-    memcpy(tmp_connection_msg, &protocol_version, sizeof(protocol_version));
-    tmp_connection_msg += sizeof(protocol_version);
-
-    memcpy(tmp_connection_msg, "user", sizeof("user"));
-    tmp_connection_msg += sizeof("user");
-
-    char *user = get_value("DB_USER", p_global_arena_data->env);
-    memcpy(tmp_connection_msg, user, strlen(user));
-    tmp_connection_msg += strlen(user);
-    *tmp_connection_msg = '\0';
-    tmp_connection_msg++;
-
-    memcpy(tmp_connection_msg, "database", sizeof("database"));
-    tmp_connection_msg += sizeof("database");
-
-    char *database = get_value("DB_NAME", p_global_arena_data->env);
-    memcpy(tmp_connection_msg, database, strlen(database));
-    tmp_connection_msg += strlen(database);
-    *tmp_connection_msg = '\0';
-    tmp_connection_msg++;
-
-    *tmp_connection_msg = '\0';
-    tmp_connection_msg++;
-
-    size_t connection_msg_size = tmp_connection_msg - connection_msg;
-    u_int32_t msg_length = htonl((u_int32_t)connection_msg_size);
-    memcpy(connection_msg, &msg_length, sizeof(msg_length));
-
-    p_global_arena_raw->current = tmp_connection_msg;
-    p_global_arena_data->connection_msg.end_addr = (uint8_t *)p_global_arena_raw->current - 1;
 
     int count = 0;
     while (count < CONNECTION_POOL_SIZE) {
@@ -1896,64 +1920,30 @@ void create_connection_pool(int server_fd) {
         assert(nfds != -1);
 
         for (i = 0; i < nfds; i++) {
-            SocketInfo *socket_info = (SocketInfo *)events[i].data.ptr;
+            FDType *type = (FDType *)events[i].data.ptr;
 
-            if (socket_info->type == DB_SOCKET) {
-                if (events[i].events & EPOLLOUT) {
-                    ssize_t bytes_sent = send(socket_info->fd, connection_msg, connection_msg_size, 0);
-                    if (bytes_sent == -1 && errno == EAGAIN) {
-                        /* If send buffer is full, try again later */
-                        continue;
-                    }
+            if (*type == DB_SOCKET) {
+                DBConnection *connection = (DBConnection *)type;
+                PostgresPollingStatusType poll_status = PQconnectPoll(connection->conn);
 
+                int fd = PQsocket(connection->conn);
+
+                if (poll_status == PGRES_POLLING_READING) {
                     event.events = EPOLLIN | EPOLLET;
-                    event.data.ptr = socket_info;
-                    assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, socket_info->fd, &event) >= 0);
-                } else if (events[i].events & EPOLLIN) {
-                    char db_connection_response[KB(1)];
-                    memset(db_connection_response, 0, sizeof(db_connection_response));
-
-                    char *tmp_response = db_connection_response;
-                    ssize_t read_stream = 0;
-
-                    while (1) {
-                        char *ptr = tmp_response + read_stream;
-
-                        ssize_t incomming_stream_size = recv(socket_info->fd, ptr, sizeof(db_connection_response) - read_stream, 0);
-                        if (incomming_stream_size == -1) {
-                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                                break;
-                            }
-                        }
-
-                        if (incomming_stream_size == 0) {
-                            printf("Postgres server closed connection\n");
-
-                            break;
-                        }
-
-                        read_stream += incomming_stream_size;
-
-                        if (incomming_stream_size <= 0) {
-                            break;
-                        }
-
-                        assert(read_stream < (ssize_t)sizeof(db_connection_response));
-                    }
-
-                    if (read_stream > 0) {
-                        connection_pool[count].alive = 1;
-                        count++;
-                    }
-
-                    /** TODO: Instead of printing raw bytes, decode to data structure. */
-                    ssize_t j;
-                    for (j = 0; j < read_stream; j++) {
-                        printf("%c", (unsigned char)db_connection_response[j]);
-                        if (j == read_stream - 1) {
-                            printf("\n");
-                        }
-                    }
+                    event.data.ptr = connection;
+                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event);
+                } else if (poll_status == PGRES_POLLING_WRITING) {
+                    event.events = EPOLLOUT | EPOLLET;
+                    event.data.ptr = connection;
+                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event);
+                } else if (poll_status == PGRES_POLLING_OK) {
+                    printf("Connection established!\n");
+                    connection->alive = 1;
+                    count++;
+                    break;
+                } else {
+                    fprintf(stderr, "Connection failed: %s\n", PQerrorMessage(connection->conn));
+                    break;
                 }
             }
         }
@@ -1997,4 +1987,36 @@ void arena_free(Arena *arena) {
     if (munmap(arena->start, arena->size) == -1) {
         assert(0);
     }
+}
+
+void print_query_result(PGresult *query_result) {
+    const int num_columns = PQnfields(query_result);
+    const int num_rows = PQntuples(query_result);
+
+    int col;
+    int row;
+    int i;
+
+    for (col = 0; col < num_columns; col++) {
+        printf("| %-10s ", PQfname(query_result, col));
+    }
+    printf("|\n");
+
+    printf("|");
+    for (col = 0; col < num_columns; col++) {
+        for (i = 0; i < 12; i++) {
+            printf("-");
+        }
+        printf("|");
+    }
+    printf("\n");
+
+    for (row = 0; row < num_rows; row++) {
+        for (col = 0; col < num_columns; col++) {
+            printf("| %-10s ", PQgetvalue(query_result, row, col));
+        }
+        printf("|\n");
+    }
+
+    printf("\n");
 }
