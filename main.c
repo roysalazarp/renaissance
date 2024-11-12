@@ -27,8 +27,8 @@
 
 #define MAX_PATH_LENGTH 200
 #define MAX_FILES 20
-#define MAX_CONNECTIONS 100    /** ?? */
-#define CONNECTION_POOL_SIZE 5 /** ?? */
+#define MAX_CONNECTIONS 100 /** ?? */
+#define CONNECTION_POOL_SIZE 5
 
 #define KB(value) ((value) * 1024)
 #define PAGE_SIZE KB(4)
@@ -53,7 +53,7 @@ typedef enum { SERVER_SOCKET, CLIENT_SOCKET, DB_SOCKET } FDType;
 typedef struct {
     FDType type;
     int fd;
-} SocketInfo;
+} Socket;
 
 typedef struct {
     size_t size;
@@ -64,7 +64,7 @@ typedef struct {
 typedef struct {
     char *start_addr;
     size_t length;
-} RequestValue;
+} String;
 
 typedef struct {
     uint8_t *start_addr;
@@ -77,16 +77,21 @@ typedef struct {
 } CharsBlock;
 
 typedef struct {
-    Arena *arena;
-    char *load_db_connection_string;
-    CharsBlock env;
-    CharsBlock public_files_paths;
-    CharsBlock statics;
-    CharsBlock components;
-    uint8_t components_count;
-    CharsBlock html_templates;
-    MemBlock connection_msg;
-    SocketInfo *socket;
+    char *db_connection_string;
+    CharsBlock envs;
+    Socket *socket;
+    struct {
+        CharsBlock paths;
+        CharsBlock file_dict;
+    } public;
+    struct {
+        struct {
+            CharsBlock paths;
+            uint8_t count;
+            CharsBlock component_dict;
+        } raw;
+        CharsBlock component_dict;
+    } html;
 } GlobalArenaDataLookup;
 
 typedef struct {
@@ -106,28 +111,23 @@ typedef struct {
 
 typedef struct {
     FDType type;
-    PGconn *conn;
     uint8_t index;
+    PGconn *conn;
     Client client;
-    uint8_t alive;
 } DBConnection;
+
 typedef struct {
     uint8_t index;
     Client client;
 } QueuedRequest;
 
-typedef struct {
-    MemBlock users_id_query;
-    MemBlock users_id_query_response;
-    CharsBlock http_response;
-} HomeGetContext;
-
 void sigint_handler(int signo);
 void router(Arena *scratch_arena_raw);
 void sign_up_create_user_post(Arena *scratch_arena_raw);
 void sign_up_get(Arena *scratch_arena_raw);
-void styles_get(Arena *scratch_arena_raw);
-void manifest_get(Arena *scratch_arena_raw);
+void public_get(Arena *scratch_arena_raw, String url);
+void styles_get(Arena *scratch_arena_raw);   /** Implement a static file server generic handler, then remove this */
+void manifest_get(Arena *scratch_arena_raw); /** Implement a static file server generic handler, then remove this */
 void home_get(Arena *scratch_arena_raw);
 void not_found(int client_socket);
 void locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
@@ -139,17 +139,16 @@ void arena_free(Arena *arena);
 void arena_reset(Arena *arena, size_t arena_header_size);
 void read_file(char **buffer, long *file_size, char *absolute_file_path);
 void resolve_slots(char *component_markdown, char *import_statement, char **templates);
-char *get_value(const char key[], CharsBlock block);
-RequestValue find_http_request_value(const char key[], char *request);
+char *get_value(const char key[], size_t key_length, CharsBlock block);
+String find_http_request_value(const char key[], char *request);
 uint16_t string_to_uint16(const char *str);
 char *load_db_connection_string(const char *filepath);
-void load_env_variables();
-void load_static();
-void load_html_components();
-void resolve_html_components_imports();
-SocketInfo *create_server_socket(uint16_t port);
-void create_connection_pool(const char *conninfo);
-void get_public_files_path();
+CharsBlock load_env_variables(const char *filepath);
+CharsBlock load_public_files(const char *base_path);
+CharsBlock load_html_components(const char *base_path);
+CharsBlock resolve_html_components_imports();
+Socket *create_server_socket(uint16_t port);
+void create_connection_pool(const char *conn_info);
 CharsBlock parse_body_value(const char key_name[], char *request_body);
 char *find_body(CharsBlock request);
 void print_query_result(PGresult *query_result);
@@ -175,32 +174,25 @@ jmp_buf db_ctx;
 
 int h_count;
 
-int main() {
-    int retval = 0;
+/** TODO: Put useful comments in the code like libpq does */
 
+int main() {
     int i;
 
     _p_global_arena_raw = arena_init(PAGE_SIZE * 20);
 
-    /**
-     * Store the pointer in a stack variable, as the
-     * stack is more likely to remain in the L1 cache.
-     */
-    Arena *p_global_arena_raw = _p_global_arena_raw;
+    /** To look up data stored in arena */
+    _p_global_arena_data = (GlobalArenaDataLookup *)arena_alloc(_p_global_arena_raw, sizeof(GlobalArenaDataLookup));
 
-    /** For convenient access to all data stored in the GlobalArenaDataLookup arena. */
-    _p_global_arena_data = (GlobalArenaDataLookup *)arena_alloc(p_global_arena_raw, sizeof(GlobalArenaDataLookup));
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+    CharsBlock envs = load_env_variables("./.env");
 
-    p_global_arena_data->arena = p_global_arena_raw;
+    const char *public_base_path = get_value("PUBLIC_FOLDER", sizeof("PUBLIC_FOLDER"), envs);
+    CharsBlock public_files = load_public_files(public_base_path);
 
-    char *connection_string = load_db_connection_string("./db_connection_params");
+    const char *html_base_path = get_value("TEMPLATES_FOLDER", sizeof("TEMPLATES_FOLDER"), envs);
+    CharsBlock html_raw_components = load_html_components(html_base_path);
 
-    load_env_variables();
-    get_public_files_path();
-    load_static();
-    load_html_components();
-    resolve_html_components_imports();
+    CharsBlock html_components = resolve_html_components_imports(); /** TODO: Review the code inside this function */
 
     /**
      * Registers a signal handler for SIGINT (to terminate the process)
@@ -212,7 +204,7 @@ int main() {
     assert(epoll_fd != -1);
 
     uint16_t port = 8080;
-    SocketInfo *server_socket = create_server_socket(port);
+    Socket *server_socket = create_server_socket(port);
     int server_fd = server_socket->fd;
 
     event.events = EPOLLIN;
@@ -221,6 +213,7 @@ int main() {
 
     printf("Server listening on port: %d...\n", port);
 
+    char *connection_string = load_db_connection_string("./db_connection_params");
     create_connection_pool(connection_string);
 
     struct sockaddr_in client_addr; /** Why is this needed ?? */
@@ -231,7 +224,7 @@ int main() {
         assert(nfds != -1);
 
         for (i = 0; i < nfds; i++) {
-            SocketInfo *socket_info = (SocketInfo *)events[i].data.ptr;
+            Socket *socket_info = (Socket *)events[i].data.ptr;
 
             switch (socket_info->type) {
                 case SERVER_SOCKET: {
@@ -246,7 +239,7 @@ int main() {
 
                         /** Allocate memory for handling client request */
                         Arena *scratch_arena_raw = arena_init(PAGE_SIZE * 10);
-                        SocketInfo *client_socket_info = (SocketInfo *)arena_alloc(scratch_arena_raw, sizeof(SocketInfo));
+                        Socket *client_socket_info = (Socket *)arena_alloc(scratch_arena_raw, sizeof(Socket));
                         client_socket_info->fd = client_fd;
                         client_socket_info->type = CLIENT_SOCKET;
 
@@ -313,6 +306,7 @@ int main() {
 
                         if (request) {
                             connection->client = request->client;
+                            memcpy(&(connection->client), &(request->client), sizeof(Client));
                             memset(&(request->client), 0, sizeof(Client));
 
                             if (setjmp(db_ctx) == 0) {
@@ -339,7 +333,7 @@ int main() {
 
     arena_free(_p_global_arena_raw);
 
-    return retval;
+    return 0;
 }
 
 uint16_t string_to_uint16(const char *str) {
@@ -368,7 +362,7 @@ uint16_t string_to_uint16(const char *str) {
 void router(Arena *scratch_arena_raw) {
     int i;
 
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     int client_socket = scratch_arena_data->client_socket;
 
@@ -383,10 +377,10 @@ void router(Arena *scratch_arena_raw) {
     ssize_t buffer_size = KB(2);
 
     int8_t does_http_request_contain_body = -1; /* -1 means we haven't checked yet */
-    RequestValue method;
+    String method;
 
     int8_t is_multipart_form_data = -1; /* -1 means we haven't checked yet */
-    RequestValue content_type;
+    String content_type;
 
     while (1) {
         char *advanced_request_ptr = tmp_request + read_stream;
@@ -491,9 +485,11 @@ void router(Arena *scratch_arena_raw) {
     scratch_arena_raw->current = tmp_request;
     scratch_arena_data->request.end_addr = (char *)scratch_arena_raw->current - 1;
 
-    RequestValue url = find_http_request_value("URL", scratch_arena_data->request.start_addr);
+    String url = find_http_request_value("URL", scratch_arena_data->request.start_addr);
 
-    if (strlen(scratch_arena_data->request.start_addr) == 0) {
+    if (strncmp(url.start_addr, "/public", strlen("/public")) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
+        public_get(scratch_arena_raw, url);
+    } else if (strlen(scratch_arena_data->request.start_addr) == 0) {
         printf("Request is empty\n");
 
         close(client_socket);
@@ -755,7 +751,7 @@ void sign_up_create_user_post(Arena *scratch_arena_raw) {
     /** Process signup */
 
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     char *body = find_body(scratch_arena_data->request);
 
@@ -836,12 +832,12 @@ CharsBlock parse_body_value(const char key_name[], char *request_body) {
 
 void sign_up_get(Arena *scratch_arena_raw) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     int client_socket = scratch_arena_data->client_socket;
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-    char *template = get_value("sign-up", p_global_arena_data->html_templates);
+    char *template = get_value("sign-up", sizeof("sign-up"), p_global_arena_data->html.component_dict);
 
     size_t response_length = strlen(response_headers) + strlen(template);
 
@@ -859,13 +855,43 @@ void sign_up_get(Arena *scratch_arena_raw) {
     arena_free(scratch_arena_raw);
 }
 
-void styles_get(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+void public_get(Arena *scratch_arena_raw, String url) {
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     int client_socket = scratch_arena_data->client_socket;
 
-    char *tmp_statics = _p_global_arena_data->statics.start_addr;
-    char *end = _p_global_arena_data->statics.end_addr;
+    const char *base_path = get_value("PUBLIC_FOLDER", sizeof("PUBLIC_FOLDER"), p_global_arena_data->envs);
+
+    char *path = (char *)arena_alloc(scratch_arena_raw, sizeof('.') + url.length);
+    char *tmp_path = path;
+    tmp_path[0] = '.';
+    tmp_path++;
+    strncpy(tmp_path, url.start_addr, url.length);
+
+    char *content = get_value(path, strlen(path), p_global_arena_data->public.file_dict);
+
+    printf("%s\n", content);
+
+    char response[] = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n\r\n"
+                      "<html><body><h1>404 Not Found</h1></body></html>";
+
+    if (send(client_socket, response, strlen(response), 0) == -1) {
+        /** TODO: Write error to logs */
+    }
+
+    close(client_socket);
+
+    arena_free(scratch_arena_raw);
+}
+
+void styles_get(Arena *scratch_arena_raw) {
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+
+    int client_socket = scratch_arena_data->client_socket;
+
+    char *tmp_statics = _p_global_arena_data->public.file_dict.start_addr;
+    char *end = _p_global_arena_data->public.file_dict.end_addr;
 
     char *css;
 
@@ -900,12 +926,12 @@ void styles_get(Arena *scratch_arena_raw) {
 }
 
 void manifest_get(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     int client_socket = scratch_arena_data->client_socket;
 
-    char *tmp_statics = _p_global_arena_data->statics.start_addr;
-    char *end = _p_global_arena_data->statics.end_addr;
+    char *tmp_statics = _p_global_arena_data->public.file_dict.start_addr;
+    char *end = _p_global_arena_data->public.file_dict.end_addr;
 
     char *manifest;
 
@@ -939,8 +965,14 @@ void manifest_get(Arena *scratch_arena_raw) {
     arena_free(scratch_arena_raw);
 }
 
+typedef struct {
+    MemBlock users_id_query;
+    MemBlock users_id_query_response;
+    CharsBlock http_response;
+} HomeGetContext;
+
 void home_get(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(SocketInfo)));
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
     scratch_arena_data->local = (HomeGetContext *)arena_alloc(scratch_arena_raw, sizeof(HomeGetContext));
 
     HomeGetContext *local = scratch_arena_data->local;
@@ -949,7 +981,7 @@ void home_get(Arena *scratch_arena_raw) {
 
     int i;
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
-        if (connection_pool[i].alive && connection_pool[i].client.fd == 0) {
+        if (connection_pool[i].client.fd == 0) {
 
             connection_pool[i].client.fd = scratch_arena_data->client_socket;
             connection_pool[i].client.scratch_arena_raw = scratch_arena_raw;
@@ -1005,11 +1037,10 @@ void home_get(Arena *scratch_arena_raw) {
     int paramFormats[2] = {1, 1};
     int resultFormat = 0;
 
-    PostgresPollingStatusType poll_status = PQconnectPoll(connection->conn);
-
     if (PQsendQueryParams(connection->conn, command, 2, paramTypes, paramValues, paramLengths, paramFormats, resultFormat) == 0) {
         fprintf(stderr, "Query failed to send: %s\n", PQerrorMessage(connection->conn));
-        assert(0);
+        int _conn_fd = PQsocket(connection->conn);
+        printf("socket: %d", _conn_fd);
     }
 
     int _conn_fd = PQsocket(connection->conn);
@@ -1042,8 +1073,14 @@ void home_get(Arena *scratch_arena_raw) {
     local = scratch_arena_data->local;
     connection = &(connection_pool[index]);
 
-    if (PQconsumeInput(connection->conn) == 0) {
-        fprintf(stderr, "PQconsumeInput failed: %s", PQerrorMessage(connection->conn));
+    while (PQisBusy(connection->conn)) {
+        int _conn_fd = PQsocket(connection->conn);
+
+        printf("busy socket: %d", _conn_fd);
+
+        if (!PQconsumeInput(connection->conn)) {
+            fprintf(stderr, "PQconsumeInput failed: %s", PQerrorMessage(connection->conn));
+        }
     }
 
     PGresult *res;
@@ -1062,7 +1099,7 @@ void home_get(Arena *scratch_arena_raw) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-    char *template = get_value("home", p_global_arena_data->html_templates);
+    char *template = get_value("home", sizeof("home"), p_global_arena_data->html.component_dict);
 
     size_t response_length = strlen(response_headers) + strlen(template);
 
@@ -1213,8 +1250,8 @@ void read_file(char **buffer, long *file_size, char *absolute_file_path) {
     fclose(file);
 }
 
-RequestValue find_http_request_value(const char key[], char *request) {
-    RequestValue value = {0};
+String find_http_request_value(const char key[], char *request) {
+    String value = {0};
 
     if (strncmp(key, "METHOD", strlen(key)) == 0) {
         value.start_addr = request;
@@ -1345,19 +1382,19 @@ RequestValue find_http_request_value(const char key[], char *request) {
     return value;
 }
 
-char *get_value(const char key[], CharsBlock block) {
+char *get_value(const char key[], size_t key_length, CharsBlock block) {
     char *ptr = block.start_addr;
     while (ptr < block.end_addr) {
-        if (strncmp(ptr, key, strlen(key)) == 0) {
+        if (strncmp(ptr, key, key_length) == 0) {
             ptr += strlen(ptr) + 1;
             return (ptr);
         }
 
-        ptr += strlen(ptr) + 1; /* Advance past the key */
-        ptr += strlen(ptr) + 1; /* Advance past the value */
+        ptr += strlen(ptr) + 1; /* Advance past key */
+        ptr += strlen(ptr) + 1; /* Advance past value */
     }
 
-    assert(0);
+    return NULL;
 }
 
 void sigint_handler(int signo) {
@@ -1379,7 +1416,7 @@ char *load_db_connection_string(const char *filepath) {
     memcpy(connection_string, file_content, (size_t)file_size);
     connection_string[file_size] = '\0';
 
-    p_global_arena_data->load_db_connection_string = connection_string;
+    p_global_arena_data->db_connection_string = connection_string;
 
     free(file_content);
     file_content = NULL;
@@ -1387,35 +1424,40 @@ char *load_db_connection_string(const char *filepath) {
     return connection_string;
 }
 
-void load_env_variables() {
+CharsBlock load_env_variables(const char *filepath) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
-    char *env_file_content = NULL;
+    char *file_content = NULL;
     long file_size = 0;
-    read_file(&env_file_content, &file_size, "./.env");
+    read_file(&file_content, &file_size, filepath);
 
     assert(file_size != 0);
 
-    char *env_vars = (char *)p_global_arena_raw->current;
-    p_global_arena_data->env.start_addr = p_global_arena_raw->current;
-    char *tmp_env_vars = env_vars;
+    /** Envs will be stored in a dictionary */
+    char *envs = (char *)p_global_arena_raw->current;
+    p_global_arena_data->envs.start_addr = p_global_arena_raw->current;
 
-    char *env_file_line = env_file_content;
-    char *end_env_file = env_file_content + file_size;
+    char *tmp_envs = envs;
 
-    while (env_file_line < end_env_file) { /** Parse basic .env file format. */
-        uint8_t env_var_name_processed = 0;
-        uint8_t env_var_value_processed = 0;
+    char *line = file_content;
+    char *end = file_content + file_size;
 
-        char *c = env_file_line;
+    while (line < end) { /** Basic .env file parsing. */
+        uint8_t processed_key = 0;
+        uint8_t processed_value = 0;
+
+        char *c = line;
+
+        /** Skip empty lines */
         if (*c == '\n') {
             goto end_of_line;
         }
 
+        /** Skip comment line */
         if (*c == '#') {
             while (*c != '\n') {
-                if (c == end_env_file) {
+                if (c == end) {
                     goto end_of_line;
                 }
 
@@ -1425,87 +1467,97 @@ void load_env_variables() {
             goto end_of_line;
         }
 
+        /** Skip whitespace characters at the beginning of the line */
         while (isspace(*c)) {
-            if (c == end_env_file) {
+            if (c == end) {
                 goto end_of_line;
             }
 
             c++;
         }
 
-        /** Processing of environment variable name begins. */
-
+        /** Start processing key */
         while (!(isspace(*c)) && *c != '=') {
-            if (c == end_env_file) {
+            if (c == end) {
                 /**
-                 * If we've reached the end while processing an env variable
-                 * name, such variable does not have an associated value.
+                 * If we've reached the end of the file while processing
+                 * the key, such variable does not have an associated value.
                  */
                 assert(0);
             }
 
-            *tmp_env_vars = *c;
-            tmp_env_vars++;
+            /** Copy key into memory buffer */
+            *tmp_envs = *c;
+            tmp_envs++;
 
             c++;
         }
 
-        *tmp_env_vars = '\0';
-        tmp_env_vars++;
+        *tmp_envs = '\0';
+        tmp_envs++;
 
-        env_var_name_processed = 1;
+        processed_key = 1;
 
+        /** Skip whitespace characters after key */
         while (isspace(*c)) {
-            if (c == end_env_file) {
+            if (c == end) {
                 goto end_of_line;
             }
 
             c++;
         }
 
+        /**
+         * The first non-whitespace character we should find after
+         * the key is the '=' after which comes the value.
+         */
         if (*c != '=') {
             assert(0);
         } else {
+            /** Skip '=' character */
             c++;
         }
 
+        /** Skip whitespace characters after '=' */
         while (isspace(*c)) {
-            if (c == end_env_file) {
+            if (c == end) {
                 goto end_of_line;
             }
 
             c++;
         }
 
-        /** Processing of environment variable associated value begins. */
-
+        /** From here we start processing value */
         uint8_t processing_value = 0;
         while (!(isspace(*c))) {
             if ((*c) != '\0') {
                 processing_value = 1;
             }
 
-            if (c == end_env_file) {
+            if (c == end) {
+                /** Reached the end of the file while processing the value */
                 if (processing_value) {
-                    env_var_value_processed = 1;
+                    processed_value = 1;
                 }
 
                 goto end_of_line;
             }
 
-            *tmp_env_vars = *c;
-            tmp_env_vars++;
+            /** Copy value into memory buffer */
+            *tmp_envs = *c;
+            tmp_envs++;
 
             c++;
         }
 
-        *tmp_env_vars = '\0';
-        tmp_env_vars++;
+        *tmp_envs = '\0';
+        tmp_envs++;
 
-        env_var_value_processed = 1;
+        processed_value = 1;
 
+        /** Skip all character after the value and proceed to next line */
         while (*c != '\n') {
-            if (c == end_env_file) {
+            if (c == end) {
                 goto end_of_line;
             }
 
@@ -1513,110 +1565,200 @@ void load_env_variables() {
         }
 
     end_of_line:
-        env_file_line = c + 1;
+        line = c + 1;
 
-        if ((env_var_name_processed == 0) != (env_var_value_processed == 0)) {
+        if ((processed_key == 0) != (processed_value == 0)) {
             /**
-             * Environment variable name and value must be processed together.
+             * Key and value must be processed together.
              * One should not be processed without the other.
              */
             assert(0);
         }
 
-        env_var_name_processed = 0;
-        env_var_value_processed = 0;
+        processed_key = 0;
+        processed_value = 0;
     }
 
-    p_global_arena_raw->current = tmp_env_vars + 1;
-    p_global_arena_data->env.end_addr = (char *)p_global_arena_raw->current - 1;
+    p_global_arena_data->envs.end_addr = tmp_envs;
+    p_global_arena_raw->current = tmp_envs + 1;
+
+    free(file_content);
+    file_content = NULL;
+
+    return p_global_arena_data->envs;
 }
 
-void get_public_files_path() {
+CharsBlock load_public_files(const char *base_path) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
+    /** Find the paths of all static files (in this case, all file stored in PUBLIC_FOLDER or subfolders) */
     char *public_files_paths = (char *)p_global_arena_raw->current;
-    p_global_arena_data->public_files_paths.start_addr = p_global_arena_raw->current;
-    char *base_path = get_value("PUBLIC_FOLDER", p_global_arena_data->env);
+    p_global_arena_data->public.paths.start_addr = public_files_paths;
     uint8_t public_files_count = 0;
     size_t all_paths_length = 0;
     locate_files(public_files_paths, base_path, NULL, 0, &public_files_count, &all_paths_length);
+    p_global_arena_data->public.paths.end_addr = public_files_paths + all_paths_length;
+    p_global_arena_raw->current = p_global_arena_data->public.paths.end_addr + 1;
 
-    p_global_arena_raw->current = (char *)p_global_arena_raw->current + all_paths_length;
-    p_global_arena_data->public_files_paths.end_addr = (char *)p_global_arena_raw->current - 1;
-}
-
-void load_static() {
-    Arena *p_global_arena_raw = _p_global_arena_raw;
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
-
-    char *statics = (char *)p_global_arena_raw->current;
-    p_global_arena_data->statics.start_addr = p_global_arena_raw->current;
-    char *tmp_statics = statics;
-
-    char *tmp_filepath = p_global_arena_data->public_files_paths.start_addr;
-    char *end = p_global_arena_data->public_files_paths.end_addr;
+    /** Load files into memory arena as key(file path) value(file content) dict */
+    char *public_files = (char *)p_global_arena_raw->current;
+    p_global_arena_data->public.file_dict.start_addr = public_files;
+    char *tmp_public_files = public_files;
+    char *tmp_public_files_paths = p_global_arena_data->public.paths.start_addr;
     char extension[] = ".html";
-
-    while (tmp_filepath < end) {
-        if (strncmp(tmp_filepath + strlen(tmp_filepath) - strlen(extension), extension, strlen(extension)) == 0) {
-            /** NOT interested in '.html' files */
-
-            tmp_filepath += strlen(tmp_filepath) + 1;
+    while (tmp_public_files_paths < p_global_arena_data->public.paths.end_addr) {
+        /** NOT interested in html files, they will be loaded differently */
+        if (strncmp(tmp_public_files_paths + strlen(tmp_public_files_paths) - strlen(extension), extension, strlen(extension)) == 0) {
+            tmp_public_files_paths += strlen(tmp_public_files_paths) + 1;
             continue;
         }
 
         char *file_content = NULL;
         long file_size = 0;
-        read_file(&file_content, &file_size, tmp_filepath);
+        read_file(&file_content, &file_size, tmp_public_files_paths);
 
-        /** Static file key */
-        strncpy(tmp_statics, tmp_filepath, strlen(tmp_filepath) + 1);
-        tmp_statics += strlen(tmp_filepath) + 1;
+        /** File path key */
+        strncpy(tmp_public_files, tmp_public_files_paths, strlen(tmp_public_files_paths) + 1);
+        tmp_public_files += strlen(tmp_public_files_paths) + 1;
 
-        /** Static file content */
-        strncpy(tmp_statics, file_content, file_size + 1);
-        tmp_statics += file_size + 1;
+        /** File content value */
+        strncpy(tmp_public_files, file_content, file_size + 1);
+        tmp_public_files += file_size + 1;
 
         free(file_content);
         file_content = NULL;
 
-        tmp_filepath += strlen(tmp_filepath) + 1;
+        tmp_public_files_paths += strlen(tmp_public_files_paths) + 1;
     }
 
-    p_global_arena_raw->current = tmp_statics;
-    p_global_arena_data->statics.end_addr = (char *)p_global_arena_raw->current - 1;
+    p_global_arena_data->public.file_dict.end_addr = tmp_public_files;
+    p_global_arena_raw->current = p_global_arena_data->public.file_dict.end_addr + 1;
+
+    return p_global_arena_data->public.file_dict;
 }
 
-void load_html_components() {
+size_t html_minify(char *buffer, char *html, size_t html_length) {
+    char *start = buffer;
+
+    char *html_end = html + html_length;
+
+    uint8_t skip_whitespace = 0;
+    while (html < html_end) {
+        if (strlen(start) == 0 && isspace(*html)) {
+            skip_whitespace = 1;
+            html++;
+            continue;
+        }
+
+        if (*html == '>') {
+            char *temp = html - 1;
+            if (isspace(*temp) && !skip_whitespace) {
+                uint8_t i = 0;
+                while (*temp) {
+                    if (!isspace(*temp)) {
+                        skip_whitespace = 1;
+                        buffer -= i - 1;
+                        break;
+                    }
+
+                    temp -= 1;
+                    i++;
+                }
+
+                continue;
+            }
+
+            skip_whitespace = 1;
+            goto copy_char;
+        }
+
+        if (*html == '<') {
+            char *temp = html - 1;
+            if (isspace(*temp) && !skip_whitespace) {
+                uint8_t i = 0;
+                while (*temp) {
+                    if (!isspace(*temp)) {
+                        skip_whitespace = 1;
+                        buffer -= i - 1;
+                        break;
+                    }
+
+                    temp -= 1;
+                    i++;
+                }
+
+                continue;
+            }
+
+            skip_whitespace = 0;
+            goto copy_char;
+        }
+
+        if (!skip_whitespace && *html == '\n') {
+            html++;
+            continue;
+        }
+
+        if (skip_whitespace && isspace(*html)) {
+            html++;
+            continue;
+        }
+
+        if (skip_whitespace && !isspace(*html)) {
+            skip_whitespace = 0;
+            goto copy_char;
+        }
+
+    copy_char:
+        *buffer = *html;
+        buffer++;
+
+        html++;
+    }
+
+    buffer[0] = '\0';
+    buffer++;
+
+    size_t length = buffer - start;
+
+    return length;
+}
+
+CharsBlock load_html_components(const char *base_path) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
+    /** Find the paths of all html files */
+    char *html_files_paths = (char *)p_global_arena_raw->current;
+    p_global_arena_data->html.raw.paths.start_addr = html_files_paths;
+    char extension[] = ".html";
+    uint8_t html_files_count = 0;
+    size_t all_paths_length = 0;
+    locate_files(html_files_paths, base_path, extension, 0, &html_files_count, &all_paths_length);
+    p_global_arena_data->html.raw.paths.end_addr = html_files_paths + all_paths_length;
+    p_global_arena_raw->current = p_global_arena_data->html.raw.paths.end_addr + 1;
+
     /* A Component is an HTML snippet that may include references to other HTML snippets, i.e., it is composable */
     char *components = (char *)p_global_arena_raw->current;
-    p_global_arena_data->components.start_addr = p_global_arena_raw->current;
+    p_global_arena_data->html.raw.component_dict.start_addr = components;
     char *tmp_components = components;
 
     uint8_t components_count = 0;
 
-    char *tmp_filepath = p_global_arena_data->public_files_paths.start_addr;
-    char *end = p_global_arena_data->public_files_paths.end_addr;
-    char extension[] = ".html";
-
-    while (tmp_filepath < end) {
-        if (strncmp(tmp_filepath + strlen(tmp_filepath) - strlen(extension), extension, strlen(extension)) != 0) {
-            /** Only interested in '.html' files */
-
-            tmp_filepath += strlen(tmp_filepath) + 1;
-            continue;
-        }
-
+    char *tmp_filepath = p_global_arena_data->html.raw.paths.start_addr;
+    while (tmp_filepath < p_global_arena_data->html.raw.paths.end_addr) {
         char *file_content = NULL;
         long file_size = 0;
-        read_file(&file_content, &file_size, tmp_filepath); /** A .html file may contain multiple Components. */
+        read_file(&file_content, &file_size, tmp_filepath);
 
+        /**
+         * A .html file may contain multiple Components and they are
+         * loaded into memory as key(component name) value(component html)
+         */
         char *tmp_file_content = file_content;
         while ((tmp_file_content = strstr(tmp_file_content, COMPONENT_DEFINITION_OPENING_TAG__START)) != NULL) { /** Process Components inside .html file. */
+            /** Start processing key (component name) */
             char *component_name_start = tmp_file_content + strlen(COMPONENT_DEFINITION_OPENING_TAG__START);
             char *component_name_end = NULL;
 
@@ -1631,89 +1773,23 @@ void load_html_components() {
                 assert(0);
             }
 
-            char *comp = tmp_components; /** TODO: Make this variable name more descriptive */
-            char *tmp_component_markdown = tmp_file_content + strlen(COMPONENT_DEFINITION_OPENING_TAG__START) + (size_t)component_name_length + strlen(COMPONENT_DEFINITION_OPENING_TAG__END);
+            /** Start processing value (component html) */
+            char *html = tmp_file_content + strlen(COMPONENT_DEFINITION_OPENING_TAG__START) + (size_t)component_name_length + strlen(COMPONENT_DEFINITION_OPENING_TAG__END);
 
-            uint8_t skip_whitespace = 0;
-            while (*tmp_component_markdown) { /** Copy component markdown from file to buffer, removing unnecessary spaces. */
-                if (strncmp(tmp_component_markdown, COMPONENT_DEFINITION_CLOSING_TAG, strlen(COMPONENT_DEFINITION_CLOSING_TAG)) == 0) {
+            size_t html_length = 0;
+            char *ptr = html;
+            while (*ptr) {
+                if (strncmp(ptr, COMPONENT_DEFINITION_CLOSING_TAG, strlen(COMPONENT_DEFINITION_CLOSING_TAG)) == 0) {
                     break;
                 }
 
-                if (strlen(comp) == 0 && isspace(*tmp_component_markdown)) {
-                    skip_whitespace = 1;
-                    tmp_component_markdown++;
-                    continue;
-                }
-
-                if (*tmp_component_markdown == '>') {
-                    char *temp = tmp_component_markdown - 1;
-                    if (isspace(*temp) && !skip_whitespace) {
-                        uint8_t i = 0;
-                        while (*temp) {
-                            if (!isspace(*temp)) {
-                                skip_whitespace = 1;
-                                tmp_components -= i - 1;
-                                break;
-                            }
-
-                            temp -= 1;
-                            i++;
-                        }
-
-                        continue;
-                    }
-
-                    skip_whitespace = 1;
-                    goto copy_char;
-                }
-
-                if (*tmp_component_markdown == '<') {
-                    char *temp = tmp_component_markdown - 1;
-                    if (isspace(*temp) && /* strlen(tmp_components) > 0 && */ !skip_whitespace) {
-                        uint8_t i = 0;
-                        while (*temp) {
-                            if (!isspace(*temp)) {
-                                skip_whitespace = 1;
-                                tmp_components -= i - 1;
-                                break;
-                            }
-
-                            temp -= 1;
-                            i++;
-                        }
-
-                        continue;
-                    }
-
-                    skip_whitespace = 0;
-                    goto copy_char;
-                }
-
-                if (!skip_whitespace && *tmp_component_markdown == '\n') {
-                    tmp_component_markdown++;
-                    continue;
-                }
-
-                if (skip_whitespace && isspace(*tmp_component_markdown)) {
-                    tmp_component_markdown++;
-                    continue;
-                }
-
-                if (skip_whitespace && !isspace(*tmp_component_markdown)) {
-                    skip_whitespace = 0;
-                    goto copy_char;
-                }
-
-            copy_char:
-                *tmp_components = *tmp_component_markdown;
-                tmp_components++;
-
-                tmp_component_markdown++;
+                html_length++;
+                ptr++;
             }
 
-            tmp_components[0] = '\0';
-            tmp_components++;
+            size_t minified_html_length = html_minify(tmp_components, html, html_length);
+
+            tmp_components += minified_html_length;
 
             components_count++;
             tmp_file_content++;
@@ -1725,28 +1801,30 @@ void load_html_components() {
         tmp_filepath += strlen(tmp_filepath) + 1;
     }
 
-    p_global_arena_raw->current = tmp_components;
-    p_global_arena_data->components.end_addr = (char *)p_global_arena_raw->current - 1;
+    p_global_arena_data->html.raw.component_dict.end_addr = tmp_components;
+    p_global_arena_raw->current = tmp_components + 1;
 
-    p_global_arena_data->components_count = components_count;
+    p_global_arena_data->html.raw.count = components_count;
+
+    return p_global_arena_data->html.raw.component_dict;
 }
 
-void resolve_html_components_imports() {
-    uint8_t i;
-
+CharsBlock resolve_html_components_imports() {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
+    uint8_t i;
+
     /* An HTML template is essentially a Component that has been compiled with all its imports. */
     char *html_templates = (char *)p_global_arena_raw->current;
-    p_global_arena_data->html_templates.start_addr = p_global_arena_raw->current;
+    p_global_arena_data->html.component_dict.start_addr = html_templates;
 
     char *tmp_html_templates = html_templates;
 
-    char *components = p_global_arena_data->components.start_addr;
+    char *components = p_global_arena_data->html.raw.component_dict.start_addr;
     char *tmp_components = components;
 
-    uint8_t components_count = p_global_arena_data->components_count;
+    uint8_t components_count = p_global_arena_data->html.raw.count;
 
     for (i = 0; i < components_count; i++) { /** Compile Components. */
         uint8_t html_template_name_length = (uint8_t)strlen(tmp_components);
@@ -1838,8 +1916,8 @@ void resolve_html_components_imports() {
                                     * the import and incorporated it into the template. */
                         }
 
-                        tmp_components_j += strlen(tmp_components_j) + 1; /* Advance past the component name */
-                        tmp_components_j += strlen(tmp_components_j) + 1; /* Advance past the component markdown */
+                        tmp_components_j += strlen(tmp_components_j) + 1; /* Advance past component name */
+                        tmp_components_j += strlen(tmp_components_j) + 1; /* Advance past component markdown */
 
                         if ((j + 1) == components_count) {
                             printf("didn't find component\n");
@@ -1859,10 +1937,12 @@ void resolve_html_components_imports() {
     }
 
     p_global_arena_raw->current = tmp_html_templates;
-    p_global_arena_data->html_templates.end_addr = (char *)p_global_arena_raw->current - 1;
+    p_global_arena_data->html.component_dict.end_addr = (char *)p_global_arena_raw->current - 1;
+
+    return p_global_arena_data->html.component_dict;
 }
 
-SocketInfo *create_server_socket(uint16_t port) {
+Socket *create_server_socket(uint16_t port) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
@@ -1885,7 +1965,7 @@ SocketInfo *create_server_socket(uint16_t port) {
 
     assert(listen(server_fd, MAX_CONNECTIONS) != -1);
 
-    SocketInfo *server_socket = arena_alloc(p_global_arena_raw, sizeof(SocketInfo));
+    Socket *server_socket = arena_alloc(p_global_arena_raw, sizeof(Socket));
     server_socket->fd = server_fd;
     server_socket->type = SERVER_SOCKET;
 
@@ -1894,10 +1974,10 @@ SocketInfo *create_server_socket(uint16_t port) {
     return p_global_arena_data->socket;
 }
 
-void create_connection_pool(const char *conninfo) {
+void create_connection_pool(const char *conn_info) {
     uint8_t i;
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
-        connection_pool[i].conn = PQconnectStart(conninfo);
+        connection_pool[i].conn = PQconnectStart(conn_info);
         if (PQstatus(connection_pool[i].conn) != CONNECTION_BAD) {
             PQsetnonblocking(connection_pool[i].conn, 1);
 
@@ -1938,7 +2018,6 @@ void create_connection_pool(const char *conninfo) {
                     epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event);
                 } else if (poll_status == PGRES_POLLING_OK) {
                     printf("Connection established!\n");
-                    connection->alive = 1;
                     count++;
                     break;
                 } else {
