@@ -48,6 +48,8 @@
 #define TEMPLATE_CLOSING_TAG "</x-template>"
 #define SLOT_TAG "<x-slot />"
 
+#define URL(path) path "\x20"
+
 typedef enum { SERVER_SOCKET, CLIENT_SOCKET, DB_SOCKET } FDType;
 
 typedef struct {
@@ -98,6 +100,7 @@ typedef struct {
     Arena *arena;
     int client_socket;
     CharsBlock request;
+    CharsBlock response;
     void *local;
 } ScratchArenaDataLookup;
 
@@ -126,11 +129,9 @@ void router(Arena *scratch_arena_raw);
 void sign_up_create_user_post(Arena *scratch_arena_raw);
 void sign_up_get(Arena *scratch_arena_raw);
 void public_get(Arena *scratch_arena_raw, String url);
-void styles_get(Arena *scratch_arena_raw);   /** Implement a static file server generic handler, then remove this */
-void manifest_get(Arena *scratch_arena_raw); /** Implement a static file server generic handler, then remove this */
 void home_get(Arena *scratch_arena_raw);
 void not_found(int client_socket);
-void locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
+char *locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
 size_t url_decode_utf8(char **string, size_t length);
 char hex_to_char(char c);
 Arena *arena_init(size_t size);
@@ -152,6 +153,11 @@ void create_connection_pool(const char *conn_info);
 CharsBlock parse_body_value(const char key_name[], char *request_body);
 char *find_body(CharsBlock request);
 void print_query_result(PGresult *query_result);
+char *get_file_type(Arena *scratch_arena_raw, const char *path);
+void view_get(Arena *scratch_arena_raw, char *view);
+void auth_validate_email_post(Arena *scratch_arena_raw);
+DBConnection *get_connection(Arena *scratch_arena_raw);
+QueuedRequest *put_in_queue(Arena *scratch_arena_raw);
 
 volatile sig_atomic_t keep_running = 1;
 
@@ -387,14 +393,16 @@ void router(Arena *scratch_arena_raw) {
 
         ssize_t incomming_stream_size = recv(client_socket, advanced_request_ptr, buffer_size - read_stream, 0);
         if (incomming_stream_size == -1) {
+            /*
             printf("Error: %s\n", strerror(errno));
+            */
 
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 if (read_stream > 0) {
                     break;
                 }
 
-                longjmp(ctx, 1); /* ?? */
+                longjmp(ctx, 1);
             }
         }
 
@@ -485,34 +493,57 @@ void router(Arena *scratch_arena_raw) {
     scratch_arena_raw->current = tmp_request;
     scratch_arena_data->request.end_addr = (char *)scratch_arena_raw->current - 1;
 
+    if (strlen(scratch_arena_data->request.start_addr) == 0) {
+        printf("Request is empty\n");
+
+        close(client_socket);
+        return;
+    }
+
     String url = find_http_request_value("URL", scratch_arena_data->request.start_addr);
 
     if (strncmp(url.start_addr, "/public", strlen("/public")) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
         public_get(scratch_arena_raw, url);
-    } else if (strlen(scratch_arena_data->request.start_addr) == 0) {
-        printf("Request is empty\n");
+        return;
+    }
 
-        close(client_socket);
-        printf("Terminated - client-fd: %d\n", client_socket);
-    } else if (strncmp(url.start_addr, "/styles.css", strlen("/styles.css")) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
-        styles_get(scratch_arena_raw);
-    } else if (strncmp(url.start_addr, "/manifest.json", strlen("/manifest.json")) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
-        manifest_get(scratch_arena_raw);
-    } else if (strncmp(url.start_addr, "/ ", strlen("/ ")) == 0) {
+    if (strncmp(url.start_addr, URL("/"), strlen(URL("/"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
             home_get(scratch_arena_raw);
+            return;
         }
-    } else if (strncmp(url.start_addr, "/sign-up ", strlen("/sign-up ")) == 0) {
+    }
+
+    if (strncmp(url.start_addr, URL("/auth"), strlen(URL("/auth"))) == 0) {
+        if (strncmp(method.start_addr, "GET", method.length) == 0) {
+            view_get(scratch_arena_raw, "auth");
+            return;
+        }
+    }
+
+    if (strncmp(url.start_addr, URL("/auth/validate-email"), strlen(URL("/auth/validate-email"))) == 0) {
+        if (strncmp(method.start_addr, "POST", method.length) == 0) {
+            auth_validate_email_post(scratch_arena_raw);
+            return;
+        }
+    }
+
+    if (strncmp(url.start_addr, URL("/sign-up"), strlen(URL("/sign-up"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
             sign_up_get(scratch_arena_raw);
+            return;
         }
-    } else if (strncmp(url.start_addr, "/sign-up/create-user ", strlen("/sign-up/create-user ")) == 0) {
+    }
+
+    if (strncmp(url.start_addr, URL("/sign-up/create-user"), strlen(URL("/sign-up/create-user"))) == 0) {
         if (strncmp(method.start_addr, "POST", method.length) == 0) {
             sign_up_create_user_post(scratch_arena_raw);
+            return;
         }
-    } else {
-        not_found(client_socket);
     }
+
+    not_found(client_socket);
+    return;
 }
 
 void resolve_slots(char *component_markdown, char *import_statement, char **templates) {
@@ -830,6 +861,208 @@ CharsBlock parse_body_value(const char key_name[], char *request_body) {
     return value;
 }
 
+void view_get(Arena *scratch_arena_raw, char *view) {
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+
+    int client_socket = scratch_arena_data->client_socket;
+
+    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+    char *template = get_value(view, strlen(view), p_global_arena_data->html.component_dict);
+
+    size_t response_length = strlen(response_headers) + strlen(template);
+
+    char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
+
+    sprintf(response, "%s%s", response_headers, template);
+    response[response_length] = '\0';
+
+    if (send(client_socket, response, strlen(response), 0) == -1) {
+        /** TODO: Write error to logs */
+    }
+
+    close(client_socket);
+
+    arena_free(scratch_arena_raw);
+}
+
+DBConnection *get_connection(Arena *scratch_arena_raw) {
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+
+    int i;
+
+    for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
+        if (connection_pool[i].client.fd == 0) {
+
+            connection_pool[i].client.fd = scratch_arena_data->client_socket;
+            connection_pool[i].client.scratch_arena_raw = scratch_arena_raw;
+            connection_pool[i].client.scratch_arena_data = scratch_arena_data;
+
+            DBConnection *connection = &(connection_pool[i]);
+
+            return connection;
+        }
+    }
+
+    return NULL;
+}
+
+QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
+    int i;
+
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+
+    for (i = 0; i < MAX_CONNECTIONS; i++) {
+        if (queue[i].client.fd == 0) {
+            /* Available spot in the queue */
+
+            queue[i].client.fd = scratch_arena_data->client_socket;
+            queue[i].client.scratch_arena_raw = scratch_arena_raw;
+            queue[i].client.scratch_arena_data = scratch_arena_data;
+            queue[i].client.queued = 1;
+
+            QueuedRequest *queued = &(queue[i]);
+
+            return queued;
+        }
+    }
+
+    assert(0);
+}
+
+void auth_validate_email_post(Arena *scratch_arena_raw) {
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+
+    DBConnection *connection = get_connection(scratch_arena_raw);
+
+    if (connection == NULL) {
+        QueuedRequest *queued = put_in_queue(scratch_arena_raw);
+
+        int r = setjmp(queued->client.jmp_buf);
+        if (r == 0) {
+            longjmp(ctx, 1);
+        }
+
+        int index = from_index(r);
+
+        connection = &(connection_pool[index]);
+
+        scratch_arena_data = connection->client.scratch_arena_data;
+        scratch_arena_raw = scratch_arena_data->arena;
+    }
+
+    assert(connection != NULL);
+
+    char *body = find_body(scratch_arena_data->request);
+
+    /** IMPORTANT: Test with email test@example.com */
+
+    CharsBlock encoded_email = parse_body_value("email", body);
+    size_t encoded_email_length = encoded_email.end_addr - encoded_email.start_addr;
+
+    char *email = (char *)arena_alloc(scratch_arena_raw, encoded_email_length);
+    memcpy(email, encoded_email.start_addr, encoded_email_length);
+    url_decode_utf8(&email, encoded_email_length);
+
+    const char *command = "SELECT * FROM app.users WHERE email = $1";
+    Oid paramTypes[1] = {25};
+    const char *paramValues[1];
+    paramValues[0] = email;
+    int paramLengths[1] = {0};
+    int paramFormats[1] = {0};
+    int resultFormat = 0;
+
+    if (PQsendQueryParams(connection->conn, command, 1, paramTypes, paramValues, paramLengths, paramFormats, resultFormat) == 0) {
+        fprintf(stderr, "Query failed to send: %s\n", PQerrorMessage(connection->conn));
+        int _conn_fd = PQsocket(connection->conn);
+        printf("socket: %d", _conn_fd);
+    }
+
+    int _conn_fd = PQsocket(connection->conn);
+
+    event.events = EPOLLIN | EPOLLET;
+    event.data.ptr = connection;
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, _conn_fd, &event);
+
+    int index;
+
+    if (connection->client.queued) {
+        int r = setjmp(connection->client.jmp_buf);
+        if (r == 0) {
+            longjmp(db_ctx, 1);
+        }
+
+        index = from_index(r);
+    } else {
+        int r = setjmp(connection->client.jmp_buf);
+        if (r == 0) {
+            longjmp(ctx, 1);
+        }
+
+        index = from_index(r);
+    }
+
+    scratch_arena_data = connection_pool[index].client.scratch_arena_data;
+    scratch_arena_raw = scratch_arena_data->arena;
+
+    connection = &(connection_pool[index]);
+
+    while (PQisBusy(connection->conn)) {
+        int _conn_fd = PQsocket(connection->conn);
+
+        printf("busy socket: %d", _conn_fd);
+
+        if (!PQconsumeInput(connection->conn)) {
+            fprintf(stderr, "PQconsumeInput failed: %s", PQerrorMessage(connection->conn));
+        }
+    }
+
+    PGresult *res;
+    while ((res = PQgetResult(connection->conn)) != NULL) {
+        if (PQresultStatus(res) != PGRES_TUPLES_OK && PQresultStatus(res) != PGRES_COMMAND_OK) {
+            fprintf(stderr, "Query failed: %s", PQerrorMessage(connection->conn));
+            PQclear(res);
+            break;
+        }
+
+        print_query_result(res);
+
+        PQclear(res);
+    }
+
+    int client_socket = scratch_arena_data->client_socket;
+
+    char response[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+
+    if (send(client_socket, response, strlen(response), 0) == -1) {
+        /** TODO: Write error to logs */
+    }
+
+    close(scratch_arena_data->client_socket);
+
+    uint8_t was_queued = connection->client.queued;
+
+    /* release connection for others to use */
+    memset(&(connection->client), 0, sizeof(Client));
+
+    int conn_fd = PQsocket(connection->conn);
+
+    event.events = EPOLLOUT | EPOLLET;
+    event.data.ptr = connection;
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_fd, &event);
+
+    arena_free(scratch_arena_raw);
+
+    if (was_queued) {
+        longjmp(db_ctx, 1); /** Jump back */
+    } else {
+        longjmp(ctx, 1); /** Jump back */
+    }
+}
+
 void sign_up_get(Arena *scratch_arena_raw) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
@@ -855,6 +1088,37 @@ void sign_up_get(Arena *scratch_arena_raw) {
     arena_free(scratch_arena_raw);
 }
 
+char *get_file_type(Arena *scratch_arena_raw, const char *path) {
+    char *path_end = path + strlen(path);
+
+    while (path < path_end) {
+        if (strncmp(path_end, ".css", strlen(".css")) == 0) {
+            char type[] = "text/css";
+            char *content_type = (char *)arena_alloc(scratch_arena_raw, sizeof(type));
+            memcpy(content_type, &type, sizeof(type));
+            return content_type;
+        }
+
+        if (strncmp(path_end, ".js", strlen(".js")) == 0) {
+            char type[] = "text/javascript";
+            char *content_type = (char *)arena_alloc(scratch_arena_raw, sizeof(type));
+            memcpy(content_type, &type, sizeof(type));
+            return content_type;
+        }
+
+        if (strncmp(path_end, ".json", strlen(".json")) == 0) {
+            char type[] = "application/json";
+            char *content_type = (char *)arena_alloc(scratch_arena_raw, sizeof(type));
+            memcpy(content_type, &type, sizeof(type));
+            return content_type;
+        }
+
+        path_end--;
+    }
+
+    assert(0);
+}
+
 void public_get(Arena *scratch_arena_raw, String url) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -869,98 +1133,35 @@ void public_get(Arena *scratch_arena_raw, String url) {
     tmp_path++;
     strncpy(tmp_path, url.start_addr, url.length);
 
+    char *public_file_type = get_file_type(scratch_arena_raw, path);
     char *content = get_value(path, strlen(path), p_global_arena_data->public.file_dict);
 
-    printf("%s\n", content);
+    char *res = (char *)scratch_arena_raw->current;
+    scratch_arena_data->response.start_addr = res;
 
-    char response[] = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n\r\n"
-                      "<html><body><h1>404 Not Found</h1></body></html>";
+    sprintf(res,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: %s\r\n\r\n"
+            "%s",
+            public_file_type, content);
 
-    if (send(client_socket, response, strlen(response), 0) == -1) {
+    char *res_end = res;
+    while (1) {
+        if (*res_end == 0) {
+            break;
+        }
+
+        res_end++;
+    }
+
+    scratch_arena_data->response.end_addr = res_end;
+    scratch_arena_raw->current = res_end + 1;
+
+    if (send(client_socket, res, strlen(res), 0) == -1) {
         /** TODO: Write error to logs */
     }
 
     close(client_socket);
-
-    arena_free(scratch_arena_raw);
-}
-
-void styles_get(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
-
-    int client_socket = scratch_arena_data->client_socket;
-
-    char *tmp_statics = _p_global_arena_data->public.file_dict.start_addr;
-    char *end = _p_global_arena_data->public.file_dict.end_addr;
-
-    char *css;
-
-    char key[] = "./public/styles.css";
-    while (tmp_statics < end) {
-        if (strncmp(key, tmp_statics, strlen(key)) == 0) {
-            tmp_statics += strlen(tmp_statics) + 1;
-
-            css = tmp_statics;
-            break;
-        }
-
-        tmp_statics += strlen(tmp_statics) + 1;
-        tmp_statics += strlen(tmp_statics) + 1;
-    }
-
-    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/css\r\n\r\n";
-    size_t response_length = strlen(response_headers) + strlen(css);
-
-    char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
-
-    sprintf(response, "%s%s", response_headers, css);
-    response[response_length] = '\0';
-
-    if (send(client_socket, response, strlen(response), 0) == -1) {
-    }
-
-    close(client_socket);
-    printf("terminated - client-fd: %d\n", client_socket);
-
-    arena_reset(scratch_arena_raw, sizeof(Arena) + sizeof(ScratchArenaDataLookup));
-}
-
-void manifest_get(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
-
-    int client_socket = scratch_arena_data->client_socket;
-
-    char *tmp_statics = _p_global_arena_data->public.file_dict.start_addr;
-    char *end = _p_global_arena_data->public.file_dict.end_addr;
-
-    char *manifest;
-
-    char key[] = "./public/manifest.json";
-    while (tmp_statics < end) {
-        if (strncmp(key, tmp_statics, strlen(key)) == 0) {
-            tmp_statics += strlen(tmp_statics) + 1;
-
-            manifest = tmp_statics;
-            break;
-        }
-
-        tmp_statics += strlen(tmp_statics) + 1;
-        tmp_statics += strlen(tmp_statics) + 1;
-    }
-
-    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\n\r\n";
-    size_t response_length = strlen(response_headers) + strlen(manifest);
-
-    char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
-
-    sprintf(response, "%s%s", response_headers, manifest);
-    response[response_length] = '\0';
-
-    if (send(client_socket, response, strlen(response), 0) == -1) {
-    }
-
-    close(client_socket);
-    printf("terminated - client-fd: %d\n", client_socket);
 
     arena_free(scratch_arena_raw);
 }
@@ -1201,7 +1402,7 @@ char hex_to_char(char c) {
  * @total_html_files:  A pointer to a counter that tracks the total number of .html files found.
  * @all_paths_length:  A pointer to track the total length of all file paths combined (including null terminators).
  */
-void locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_files, size_t *all_paths_length) {
+char *locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_files, size_t *all_paths_length) {
     DIR *dir = opendir(base_path);
     assert(dir != NULL);
 
@@ -1214,7 +1415,7 @@ void locate_files(char *buffer, const char *base_path, const char *extension, ui
             sprintf(path, "%s/%s", base_path, entry->d_name);
 
             if (stat(path, &statbuf) == 0 && S_ISDIR(statbuf.st_mode)) {
-                locate_files(buffer, path, extension, level + 1, total_files, all_paths_length);
+                buffer = locate_files(buffer, path, extension, level + 1, total_files, all_paths_length);
             } else {
                 entry_name_length = strlen(entry->d_name);
                 if ((extension == NULL) || ((entry_name_length > strlen(extension)) && (strcmp(entry->d_name + entry_name_length - strlen(extension), extension) == 0))) {
@@ -1231,6 +1432,8 @@ void locate_files(char *buffer, const char *base_path, const char *extension, ui
     }
 
     closedir(dir);
+
+    return buffer;
 }
 
 void read_file(char **buffer, long *file_size, char *absolute_file_path) {
