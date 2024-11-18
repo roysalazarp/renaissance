@@ -58,11 +58,6 @@
 #define OPENING "{{"
 #define CLOSING "}}"
 
-/*
-#define FOR_START " for"
-#define FOR_END " end-for"
-*/
-
 #define URL(path) path "\x20"
 
 /*
@@ -102,6 +97,11 @@ typedef struct {
     char *start_addr;
     char *end_addr;
 } CharsBlock;
+
+typedef struct {
+    char *before;
+    char *after;
+} BlockId;
 
 typedef struct {
     char *db_connection_string;
@@ -169,8 +169,9 @@ CharsBlock load_public_files(const char *base_path);
 CharsBlock load_html_components(const char *base_path);
 CharsBlock resolve_html_components_imports();
 void resolve_slots(char *component_markdown, char *import_statement, char **templates);
-void render(char *template, char *scope, int count, ...);
-char *find_token(char *string, char *keyword, TokenType token_type, CharPointer pointer);
+size_t render(char *template, char *scope, int times, ...);
+BlockId find_token(char *string, char *keyword, TokenType token_type);
+size_t html_minify(char *buffer, char *html, size_t html_length);
 
 /** Connection */
 char *load_db_connection_string(const char *filepath);
@@ -1138,7 +1139,9 @@ void public_get(Arena *scratch_arena_raw, String url) {
     arena_free(scratch_arena_raw);
 }
 
-char *find_token(char *string, char *keyword, TokenType token_type, CharPointer pointer) {
+BlockId find_token(char *string, char *keyword, TokenType token_type) {
+    BlockId token = {0};
+
     char *block = NULL;
 
     char *for_start = " for";
@@ -1181,11 +1184,9 @@ char *find_token(char *string, char *keyword, TokenType token_type, CharPointer 
                                     continue;
                                 } else if (strncmp(after_block_name, "}}", strlen("}}")) == 0) {
                                     printf("Next after block name IS \"}}\"\n");
-                                    if (pointer) {
-                                        block = after_block_name + strlen("}}");
-                                    } else {
-                                        block = before_for + 1 - strlen("{{");
-                                    }
+
+                                    token.before = before_for + 1 - strlen("{{");
+                                    token.after = after_block_name + strlen("}}");
 
                                     goto exit;
                                 } else {
@@ -1209,59 +1210,108 @@ char *find_token(char *string, char *keyword, TokenType token_type, CharPointer 
     }
 
 exit:
-    return block;
+    return token;
 }
 
-void render(char *template, char *block_name, int count, ...) {
+size_t render(char *template, char *block_name, int times, ...) {
     va_list args;
-    CharsBlock key_value;
+    CharsBlock key_value = {0};
 
-    char *block = find_token(template, block_name, FOR_START, POINT_AFTER);
-    char *block_end = find_token(template, block_name, FOR_END, POINT_BEFORE);
+    BlockId block_start = find_token(template, block_name, FOR_START);
+    BlockId block_end = find_token(template, block_name, FOR_END);
 
-    size_t block_length = block_end - block;
+    size_t block_length = block_end.before - block_start.after;
 
     char *block_copy = (char *)malloc((block_length + 1) * sizeof(char));
-    memcpy(block_copy, block, block_length);
+    memcpy(block_copy, block_start.after, block_length);
     block_copy[block_length] = '\0';
+    char *block_copy_end = block_copy + block_length;
 
-    char *start = block;
-    char *after = start + block_length;
+    char *start = block_start.before;
+    char *after = block_end.after;
 
-    va_start(args, count);
+    size_t after_copy_lenght = strlen(after);
+    char *after_copy = (char *)malloc((after_copy_lenght + 1) * sizeof(char));
+    memcpy(after_copy, after, after_copy_lenght);
+    after_copy[after_copy_lenght] = '\0';
+
+    size_t room = block_end.after - block_start.before;
+
+    va_start(args, times);
 
     int i;
-    for (i = 0; i < count; i++) {
+    for (i = 0; i < times; i++) {
         key_value = va_arg(args, CharsBlock);
 
-        size_t rendered_length = block_length;
+        char *tmp_block_copy = block_copy;
 
-        char *ptr = key_value.start_addr;
-        while (ptr < key_value.end_addr) {
-            /* key */
-            size_t key_length = strlen(ptr);
-            printf("key -> \"%s\": %lu\n", ptr, key_length);
-            ptr += strlen(ptr) + 1;
+        while (tmp_block_copy < block_copy_end) {
+            if (strncmp(tmp_block_copy, "{{", strlen("{{")) == 0) {
+                char *token = tmp_block_copy + strlen("{{");
 
-            /* value */
-            size_t value_length = strlen(ptr);
-            printf("value -> \"%s\": %lu\n", ptr, value_length);
-            ptr += strlen(ptr) + 1;
+                char *token_start;
+                char *token_end;
 
-            ssize_t value_difference = value_length - key_length;
-            rendered_length += value_difference;
+                while (isspace(*token)) {
+                    token++;
+                }
+
+                token_start = token;
+
+                while (!isspace(*token)) {
+                    token++;
+                }
+
+                token_end = token;
+
+                while (isspace(*token)) {
+                    token++;
+                }
+
+                if (strncmp(token, "}}", strlen("}}")) == 0) {
+                    token += strlen("}}");
+                    size_t length = token_end - token_start;
+
+                    if (key_value.start_addr && key_value.end_addr) {
+                        char *value = get_value(token_start, length, key_value);
+
+                        if (value) {
+                            size_t val_length = strlen(value);
+                            memcpy(start, value, val_length);
+
+                            tmp_block_copy = token;
+                            start += val_length;
+
+                            printf("\n");
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            *start = *tmp_block_copy;
+
+            start++;
+            tmp_block_copy++;
         }
 
-        memmove(start + rendered_length, after, strlen(after));
-        memset(start, 'A', rendered_length);
-
-        start += rendered_length;
         after = start;
+    }
+
+    memcpy(start, after_copy, after_copy_lenght);
+    start[after_copy_lenght] = '\0';
+
+    /** Clean up memory */
+    char *p = start + after_copy_lenght + 1;
+    while (*p != '\0') {
+        *p = '\0';
     }
 
     printf("\n");
 
     va_end(args);
+
+    return strlen(template);
 }
 
 /**
@@ -1364,31 +1414,59 @@ void home_get(Arena *scratch_arena_raw) {
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
     char *template = get_value("home", sizeof("home"), p_global_arena_data->html.component_dict);
 
-    char *template_cpy = arena_alloc(scratch_arena_raw, strlen(template) + 1);
+    char *template_cpy = (char *)scratch_arena_raw->current;
+
     memcpy(template_cpy, template, strlen(template) + 1);
 
-    char _key_value_01[] = "{{ name }}\0Table 1\0{{ sub_name }}\0some long subname";
+    char _key_value_01[] = "name\0Table 1ajkshdkjsadhakjsdhsadkjhasjdksahdjkashdakj\0sub_name\0some long subname";
     CharsBlock key_value_01;
     key_value_01.start_addr = _key_value_01;
     key_value_01.end_addr = &(_key_value_01[sizeof(_key_value_01)]);
 
-    char _key_value_02[] = "{{ name }}\0Table 2\0{{ sub_name }}\0some long subname";
+    char _key_value_02[] = "name\0Table 2\0sub_name\0some long subname";
     CharsBlock key_value_02;
     key_value_02.start_addr = _key_value_02;
     key_value_02.end_addr = &(_key_value_02[sizeof(_key_value_02)]);
 
-    char _key_value_03[] = "{{ name }}\0Table 3\0{{ sub_name }}\0some long subname";
+    char _key_value_03[] = "name\0Table 3\0sub_name\0some long subname";
     CharsBlock key_value_03;
     key_value_03.start_addr = _key_value_03;
     key_value_03.end_addr = &(_key_value_03[sizeof(_key_value_03)]);
 
+    CharsBlock empty = {0};
+
     render(template_cpy, "table", 3, key_value_01, key_value_02, key_value_03);
 
-    size_t response_length = strlen(response_headers) + strlen(template);
+    render(template_cpy, "rows", 2, empty, empty);
+    render(template_cpy, "cells", 3, empty, empty, empty);
+    render(template_cpy, "cells", 1, empty);
+
+    render(template_cpy, "rows", 5, empty, empty, empty, empty, empty);
+    render(template_cpy, "cells", 4, empty, empty, empty);
+    render(template_cpy, "cells", 1, empty);
+    render(template_cpy, "cells", 1, empty);
+    render(template_cpy, "cells", 2, empty, empty, empty);
+    render(template_cpy, "cells", 1, empty);
+
+    render(template_cpy, "rows", 3, empty, empty, empty);
+    render(template_cpy, "cells", 1, empty);
+    render(template_cpy, "cells", 1, empty);
+    render(template_cpy, "cells", 1, empty);
+
+    /* TODO: add support for (0 times) -> render(template_cpy, "cells", 0); */
+
+    scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
+
+    char *response_html_minified = (char *)scratch_arena_raw->current;
+    html_minify(response_html_minified, template_cpy, strlen(template_cpy));
+
+    scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(response_html_minified) + 1;
+
+    size_t response_length = strlen(response_headers) + strlen(response_html_minified);
 
     char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
 
-    sprintf(response, "%s%s", response_headers, template);
+    sprintf(response, "%s%s", response_headers, response_html_minified);
     response[response_length] = '\0';
 
     int resl = send(scratch_arena_data->client_socket, response, strlen(response), 0);
