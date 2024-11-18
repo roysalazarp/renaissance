@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 #include <setjmp.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,12 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+/*
++-----------------------------------------------------------------------------------+
+|                                     defines                                       |
++-----------------------------------------------------------------------------------+
+*/
 
 #ifndef MAP_ANONYMOUS
 #define MAP_ANONYMOUS 0x20
@@ -48,7 +55,25 @@
 #define TEMPLATE_CLOSING_TAG "</x-template>"
 #define SLOT_TAG "<x-slot />"
 
+#define OPENING "{{"
+#define CLOSING "}}"
+
+/*
+#define FOR_START " for"
+#define FOR_END " end-for"
+*/
+
 #define URL(path) path "\x20"
+
+/*
++-----------------------------------------------------------------------------------+
+|                                     structs                                       |
++-----------------------------------------------------------------------------------+
+*/
+
+typedef enum { FOR_START, FOR_END } TokenType;
+
+typedef enum { POINT_BEFORE, POINT_AFTER } CharPointer;
 
 typedef enum { SERVER_SOCKET, CLIENT_SOCKET, DB_SOCKET } FDType;
 
@@ -124,42 +149,66 @@ typedef struct {
     Client client;
 } QueuedRequest;
 
-void sigint_handler(int signo);
-void router(Arena *scratch_arena_raw);
-void sign_up_create_user_post(Arena *scratch_arena_raw);
-void sign_up_get(Arena *scratch_arena_raw);
-void public_get(Arena *scratch_arena_raw, String url);
-void home_get(Arena *scratch_arena_raw);
-void not_found(int client_socket);
-char *locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
-size_t url_decode_utf8(char **string, size_t length);
-char hex_to_char(char c);
+/*
++-----------------------------------------------------------------------------------+
+|                               function declaration                                |
++-----------------------------------------------------------------------------------+
+*/
+
+/** Server setup */
+Socket *create_server_socket(uint16_t port);
+
+/** Arena */
 Arena *arena_init(size_t size);
 void *arena_alloc(Arena *arena, size_t size);
 void arena_free(Arena *arena);
 void arena_reset(Arena *arena, size_t arena_header_size);
-void read_file(char **buffer, long *file_size, char *absolute_file_path);
-void resolve_slots(char *component_markdown, char *import_statement, char **templates);
-char *get_value(const char key[], size_t key_length, CharsBlock block);
-String find_http_request_value(const char key[], char *request);
-uint16_t string_to_uint16(const char *str);
-char *load_db_connection_string(const char *filepath);
-CharsBlock load_env_variables(const char *filepath);
+
+/** Template engine */
 CharsBlock load_public_files(const char *base_path);
 CharsBlock load_html_components(const char *base_path);
 CharsBlock resolve_html_components_imports();
-Socket *create_server_socket(uint16_t port);
+void resolve_slots(char *component_markdown, char *import_statement, char **templates);
+void render(char *template, char *scope, int count, ...);
+char *find_token(char *string, char *keyword, TokenType token_type, CharPointer pointer);
+
+/** Connection */
+char *load_db_connection_string(const char *filepath);
 void create_connection_pool(const char *conn_info);
-CharsBlock parse_body_value(const char key_name[], char *request_body);
-char *find_body(CharsBlock request);
-void print_query_result(PGresult *query_result);
-char *get_file_type(Arena *scratch_arena_raw, const char *path);
-void view_get(Arena *scratch_arena_raw, char *view);
-void auth_validate_email_post(Arena *scratch_arena_raw);
 DBConnection *get_connection(Arena *scratch_arena_raw);
 QueuedRequest *put_in_queue(Arena *scratch_arena_raw);
+void print_query_result(PGresult *query_result);
 
-volatile sig_atomic_t keep_running = 1;
+/** Request handlers */
+void router(Arena *scratch_arena_raw);
+void home_get(Arena *scratch_arena_raw);
+void not_found(int client_socket);
+void public_get(Arena *scratch_arena_raw, String url);
+void view_get(Arena *scratch_arena_raw, char *view);
+void sign_up_get(Arena *scratch_arena_raw);
+void sign_up_create_user_post(Arena *scratch_arena_raw);
+void auth_validate_email_post(Arena *scratch_arena_raw);
+
+/** Request utils */
+String find_http_request_value(const char key[], char *request);
+uint16_t string_to_uint16(const char *str);
+char *find_body(CharsBlock request);
+CharsBlock parse_body_value(const char key_name[], char *request_body);
+char *file_content_type(Arena *scratch_arena_raw, const char *path);
+size_t url_decode_utf8(char **string, size_t length);
+
+/** Utils */
+CharsBlock load_env_variables(const char *filepath);
+void read_file(char **buffer, long *file_size, char *absolute_file_path);
+char *locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
+char *get_value(const char key[], size_t key_length, CharsBlock block);
+char hex_to_char(char c);
+
+/*
++-----------------------------------------------------------------------------------+
+|                                     globals                                       |
++-----------------------------------------------------------------------------------+
+*/
 
 Arena *_p_global_arena_raw;
 GlobalArenaDataLookup *_p_global_arena_data;
@@ -180,8 +229,15 @@ jmp_buf db_ctx;
 
 int h_count;
 
-/** TODO: Put useful comments in the code like libpq does */
+/*
++-----------------------------------------------------------------------------------+
+|                                       code                                        |
++-----------------------------------------------------------------------------------+
+*/
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 int main() {
     int i;
 
@@ -199,12 +255,6 @@ int main() {
     CharsBlock html_raw_components = load_html_components(html_base_path);
 
     CharsBlock html_components = resolve_html_components_imports(); /** TODO: Review the code inside this function */
-
-    /**
-     * Registers a signal handler for SIGINT (to terminate the process)
-     * to exit the program gracefully for Valgrind to show the program report.
-     */
-    assert(signal(SIGINT, sigint_handler) != SIG_ERR);
 
     epoll_fd = epoll_create1(0);
     assert(epoll_fd != -1);
@@ -342,6 +392,9 @@ int main() {
     return 0;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 uint16_t string_to_uint16(const char *str) {
     char *endptr;
     errno = 0;
@@ -365,6 +418,9 @@ uint16_t string_to_uint16(const char *str) {
     return (uint16_t)ul;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void router(Arena *scratch_arena_raw) {
     int i;
 
@@ -546,6 +602,9 @@ void router(Arena *scratch_arena_raw) {
     return;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void resolve_slots(char *component_markdown, char *import_statement, char **templates) {
     char *ptr;
 
@@ -653,131 +712,9 @@ void resolve_slots(char *component_markdown, char *import_statement, char **temp
     resolve_slots(component_markdown, template_closing_tag, templates);
 }
 
-typedef struct __attribute__((packed)) {
-    /* Parse message */
-    char parse_msg_type;
-    uint32_t parse_msg_length;
-    char parse_unnamed_statement;
-    char command[53]; /* "SELECT * FROM app.countries WHERE id = $1 OR id = $2" */
-    uint16_t nParams_for_paramTypes;
-    uint32_t paramType_01;
-    uint32_t paramType_02;
-
-    /* Bind message */
-    char bind_msg_type;
-    uint32_t bind_msg_length;
-    char bind_unnamed_portal;
-    char bind_unnamed_statement;
-
-    uint16_t nParams_for_paramFormats;
-    uint16_t paramFormat_01;
-    uint16_t paramFormat_02;
-
-    uint16_t nParams_for_paramValues;
-    uint32_t paramValuesSize_01;
-    int paramValues_01;
-    uint32_t paramValuesSize_02;
-    int paramValues_02;
-
-    uint16_t num_1;
-    uint16_t result_format;
-
-    /* Describe Portal message */
-    char describe_portal_msg_type;
-    uint32_t describe_portal_msg_length;
-    char P;
-    char describe_portal_empty_string;
-
-    /* Execute message */
-    char execute_msg_type;
-    uint32_t execute_msg_length;
-    char execute_empty_string;
-    uint32_t num_0;
-
-    /* Sync message */
-    char sync_msg_type;
-    uint32_t sync_msg_length;
-} SelectTwoCountriesQuery;
-
-SelectTwoCountriesQuery select_two_countries_query() {
-    SelectTwoCountriesQuery query = {0};
-
-    /* Parse message */
-    query.parse_msg_type = 'P';
-    /* clang-format off */
-    query.parse_msg_length = htonl(sizeof(query.parse_msg_length) 
-                                 + sizeof(query.parse_unnamed_statement) 
-                                 + 53 
-                                 + sizeof(query.nParams_for_paramTypes) 
-                                 + sizeof(query.paramType_01) 
-                                 + sizeof(query.paramType_02));
-    /* clang-format on */
-    query.parse_unnamed_statement = (char)0;
-    memcpy(query.command, "SELECT * FROM app.countries WHERE id = $1 OR id = $2", 53);
-    query.nParams_for_paramTypes = htons((uint16_t)2);
-    query.paramType_01 = htonl((uint32_t)23);
-    query.paramType_02 = htonl((uint32_t)23);
-
-    /* Bind message */
-    query.bind_msg_type = 'B';
-    /* clang-format off */
-    query.bind_msg_length = htonl(sizeof(query.bind_msg_length) 
-                                + sizeof(query.bind_unnamed_portal) 
-                                + sizeof(query.bind_unnamed_statement) 
-                                + sizeof(query.nParams_for_paramFormats) 
-                                + sizeof(query.paramFormat_01) 
-                                + sizeof(query.paramFormat_02) 
-                                + sizeof(query.nParams_for_paramValues) 
-                                + sizeof(query.paramValuesSize_01) 
-                                + sizeof(query.paramValues_01) 
-                                + sizeof(query.paramValuesSize_02) 
-                                + sizeof(query.paramValues_02) 
-                                + sizeof(query.num_1) 
-                                + sizeof(query.result_format));
-    /* clang-format on */
-    query.bind_unnamed_portal = (char)0;
-    query.bind_unnamed_statement = (char)0;
-
-    query.nParams_for_paramFormats = htons((uint16_t)2);
-    query.paramFormat_01 = htons((uint16_t)1);
-    query.paramFormat_02 = htons((uint16_t)1);
-
-    query.nParams_for_paramValues = htons((uint16_t)2);
-    query.paramValuesSize_01 = htonl((uint32_t)4);
-    query.paramValues_01 = htonl((int)3);
-    query.paramValuesSize_02 = htonl((uint32_t)4);
-    query.paramValues_02 = htonl((int)23);
-
-    query.num_1 = htons((uint16_t)1);
-    query.result_format = htons((uint16_t)0);
-
-    /* Describe Portal message */
-    query.describe_portal_msg_type = 'D';
-    /* clang-format off */
-    query.describe_portal_msg_length = htonl(sizeof(query.describe_portal_msg_length) 
-                                           + sizeof(query.P) 
-                                           + sizeof(query.describe_portal_empty_string));
-    /* clang-format on */
-    query.P = 'P';
-    query.describe_portal_empty_string = (char)0;
-
-    /* Execute message */
-    query.execute_msg_type = 'E';
-    /* clang-format off */
-    query.execute_msg_length = htonl(sizeof(uint32_t) 
-                                   + sizeof(query.execute_empty_string) 
-                                   + sizeof(uint32_t));
-    /* clang-format on */
-    query.execute_empty_string = (char)0;
-    query.num_0 = htonl((uint32_t)0);
-
-    /* Sync message */
-    query.sync_msg_type = 'S';
-    query.sync_msg_length = htonl(sizeof(uint32_t));
-
-    return query;
-}
-
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void sign_up_create_user_post(Arena *scratch_arena_raw) {
     /** Process signup */
 
@@ -810,6 +747,9 @@ void sign_up_create_user_post(Arena *scratch_arena_raw) {
     close(client_socket);
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 char *find_body(CharsBlock request) {
     char *body = request.start_addr;
 
@@ -827,6 +767,9 @@ char *find_body(CharsBlock request) {
     return body;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 CharsBlock parse_body_value(const char key_name[], char *request_body) {
     CharsBlock value = {0};
     value.start_addr = request_body;
@@ -861,6 +804,9 @@ CharsBlock parse_body_value(const char key_name[], char *request_body) {
     return value;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void view_get(Arena *scratch_arena_raw, char *view) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
@@ -886,6 +832,9 @@ void view_get(Arena *scratch_arena_raw, char *view) {
     arena_free(scratch_arena_raw);
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 DBConnection *get_connection(Arena *scratch_arena_raw) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
@@ -908,6 +857,9 @@ DBConnection *get_connection(Arena *scratch_arena_raw) {
     return NULL;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
     int i;
 
@@ -932,6 +884,9 @@ QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
     assert(0);
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void auth_validate_email_post(Arena *scratch_arena_raw) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
@@ -1013,17 +968,17 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
     while (PQisBusy(connection->conn)) {
         int _conn_fd = PQsocket(connection->conn);
 
-        printf("busy socket: %d", _conn_fd);
+        printf("busy socket: %d\n", _conn_fd);
 
         if (!PQconsumeInput(connection->conn)) {
-            fprintf(stderr, "PQconsumeInput failed: %s", PQerrorMessage(connection->conn));
+            fprintf(stderr, "PQconsumeInput failed: %s\n", PQerrorMessage(connection->conn));
         }
     }
 
     PGresult *res;
     while ((res = PQgetResult(connection->conn)) != NULL) {
         if (PQresultStatus(res) != PGRES_TUPLES_OK && PQresultStatus(res) != PGRES_COMMAND_OK) {
-            fprintf(stderr, "Query failed: %s", PQerrorMessage(connection->conn));
+            fprintf(stderr, "Query failed: %s\n", PQerrorMessage(connection->conn));
             PQclear(res);
             break;
         }
@@ -1035,7 +990,15 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
 
     int client_socket = scratch_arena_data->client_socket;
 
-    char response[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+    char *template = get_value("login-form", sizeof("login-form"), p_global_arena_data->html.component_dict);
+
+    size_t response_length = strlen(response_headers) + strlen(template);
+
+    char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
+
+    sprintf(response, "%s%s", response_headers, template);
+    response[response_length] = '\0';
 
     if (send(client_socket, response, strlen(response), 0) == -1) {
         /** TODO: Write error to logs */
@@ -1063,6 +1026,9 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
     }
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void sign_up_get(Arena *scratch_arena_raw) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
@@ -1088,7 +1054,10 @@ void sign_up_get(Arena *scratch_arena_raw) {
     arena_free(scratch_arena_raw);
 }
 
-char *get_file_type(Arena *scratch_arena_raw, const char *path) {
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
+char *file_content_type(Arena *scratch_arena_raw, const char *path) {
     char *path_end = path + strlen(path);
 
     while (path < path_end) {
@@ -1119,6 +1088,9 @@ char *get_file_type(Arena *scratch_arena_raw, const char *path) {
     assert(0);
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void public_get(Arena *scratch_arena_raw, String url) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -1133,7 +1105,7 @@ void public_get(Arena *scratch_arena_raw, String url) {
     tmp_path++;
     strncpy(tmp_path, url.start_addr, url.length);
 
-    char *public_file_type = get_file_type(scratch_arena_raw, path);
+    char *public_file_type = file_content_type(scratch_arena_raw, path);
     char *content = get_value(path, strlen(path), p_global_arena_data->public.file_dict);
 
     char *res = (char *)scratch_arena_raw->current;
@@ -1166,63 +1138,154 @@ void public_get(Arena *scratch_arena_raw, String url) {
     arena_free(scratch_arena_raw);
 }
 
-typedef struct {
-    MemBlock users_id_query;
-    MemBlock users_id_query_response;
-    CharsBlock http_response;
-} HomeGetContext;
+char *find_token(char *string, char *keyword, TokenType token_type, CharPointer pointer) {
+    char *block = NULL;
 
-void home_get(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
-    scratch_arena_data->local = (HomeGetContext *)arena_alloc(scratch_arena_raw, sizeof(HomeGetContext));
+    char *for_start = " for";
+    char *for_end = " end-for";
 
-    HomeGetContext *local = scratch_arena_data->local;
+    char *type;
 
-    DBConnection *connection;
+    if (token_type == FOR_START) {
+        type = for_start;
+    } else if (token_type == FOR_END) {
+        type = for_end;
+    } else {
+        assert(0);
+    }
 
-    int i;
-    for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
-        if (connection_pool[i].client.fd == 0) {
+    char *tmp_template = string;
+    while (*tmp_template != '\0') {
+        if (strncmp(tmp_template, keyword, strlen(keyword)) == 0) {
+            char *before_block_name = tmp_template - 1;
+            char *after_block_name = tmp_template + strlen(keyword);
 
-            connection_pool[i].client.fd = scratch_arena_data->client_socket;
-            connection_pool[i].client.scratch_arena_raw = scratch_arena_raw;
-            connection_pool[i].client.scratch_arena_data = scratch_arena_data;
+            while (before_block_name > string) {
+                if (isspace(*before_block_name)) {
+                    before_block_name--;
+                    continue;
+                } else if (strncmp(before_block_name + 1 - strlen(type), type, strlen(type)) == 0) {
+                    printf("Previous word IS \"for\"\n");
+                    char *before_for = before_block_name + 1 - strlen(type);
 
-            connection = &(connection_pool[i]);
+                    while (before_for > string) {
+                        if (isspace(*before_for)) {
+                            before_for--;
+                            continue;
+                        } else if (strncmp(before_for + 1 - strlen("{{"), "{{", strlen("{{")) == 0) {
+                            printf("Previous word IS \"{{\"\n");
 
-            break;
-        }
+                            while (*after_block_name != '\0') {
+                                if (isspace(*after_block_name)) {
+                                    after_block_name++;
+                                    continue;
+                                } else if (strncmp(after_block_name, "}}", strlen("}}")) == 0) {
+                                    printf("Next after block name IS \"}}\"\n");
+                                    if (pointer) {
+                                        block = after_block_name + strlen("}}");
+                                    } else {
+                                        block = before_for + 1 - strlen("{{");
+                                    }
 
-        if (i + 1 == CONNECTION_POOL_SIZE) {
-            int j;
-            for (j = 0; j < MAX_CONNECTIONS; j++) {
-                if (queue[j].client.fd == 0) {
-                    /* Available spot in the queue */
-
-                    queue[j].client.fd = scratch_arena_data->client_socket;
-                    queue[j].client.scratch_arena_raw = scratch_arena_raw;
-                    queue[j].client.scratch_arena_data = scratch_arena_data;
-                    queue[j].client.queued = 1;
-
-                    int r = setjmp(queue[j].client.jmp_buf);
-                    if (r == 0) {
-                        longjmp(ctx, 1);
+                                    goto exit;
+                                } else {
+                                    printf("Next after block name IS NOT \"}}\"\n");
+                                    break;
+                                }
+                            }
+                        } else {
+                            printf("Previous word IS NOT \"{{\"\n");
+                            break;
+                        }
                     }
-
-                    int index = from_index(r);
-
-                    scratch_arena_data = connection_pool[index].client.scratch_arena_data;
-                    scratch_arena_raw = scratch_arena_data->arena;
-
-                    local = scratch_arena_data->local;
-                    connection = &(connection_pool[index]);
-
+                } else {
+                    printf("Previous word IS NOT \"for\"\n");
                     break;
                 }
             }
-
-            assert(connection->client.fd != 0);
         }
+
+        tmp_template++;
+    }
+
+exit:
+    return block;
+}
+
+void render(char *template, char *block_name, int count, ...) {
+    va_list args;
+    CharsBlock key_value;
+
+    char *block = find_token(template, block_name, FOR_START, POINT_AFTER);
+    char *block_end = find_token(template, block_name, FOR_END, POINT_BEFORE);
+
+    size_t block_length = block_end - block;
+
+    char *block_copy = (char *)malloc((block_length + 1) * sizeof(char));
+    memcpy(block_copy, block, block_length);
+    block_copy[block_length] = '\0';
+
+    char *start = block;
+    char *after = start + block_length;
+
+    va_start(args, count);
+
+    int i;
+    for (i = 0; i < count; i++) {
+        key_value = va_arg(args, CharsBlock);
+
+        size_t rendered_length = block_length;
+
+        char *ptr = key_value.start_addr;
+        while (ptr < key_value.end_addr) {
+            /* key */
+            size_t key_length = strlen(ptr);
+            printf("key -> \"%s\": %lu\n", ptr, key_length);
+            ptr += strlen(ptr) + 1;
+
+            /* value */
+            size_t value_length = strlen(ptr);
+            printf("value -> \"%s\": %lu\n", ptr, value_length);
+            ptr += strlen(ptr) + 1;
+
+            ssize_t value_difference = value_length - key_length;
+            rendered_length += value_difference;
+        }
+
+        memmove(start + rendered_length, after, strlen(after));
+        memset(start, 'A', rendered_length);
+
+        start += rendered_length;
+        after = start;
+    }
+
+    printf("\n");
+
+    va_end(args);
+}
+
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
+void home_get(Arena *scratch_arena_raw) {
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+
+    DBConnection *connection = get_connection(scratch_arena_raw);
+
+    if (connection == NULL) {
+        QueuedRequest *queued = put_in_queue(scratch_arena_raw);
+
+        int r = setjmp(queued->client.jmp_buf);
+        if (r == 0) {
+            longjmp(ctx, 1);
+        }
+
+        int index = from_index(r);
+
+        connection = &(connection_pool[index]);
+
+        scratch_arena_data = connection->client.scratch_arena_data;
+        scratch_arena_raw = scratch_arena_data->arena;
     }
 
     assert(connection != NULL);
@@ -1241,7 +1304,7 @@ void home_get(Arena *scratch_arena_raw) {
     if (PQsendQueryParams(connection->conn, command, 2, paramTypes, paramValues, paramLengths, paramFormats, resultFormat) == 0) {
         fprintf(stderr, "Query failed to send: %s\n", PQerrorMessage(connection->conn));
         int _conn_fd = PQsocket(connection->conn);
-        printf("socket: %d", _conn_fd);
+        printf("socket: %d\n", _conn_fd);
     }
 
     int _conn_fd = PQsocket(connection->conn);
@@ -1271,23 +1334,22 @@ void home_get(Arena *scratch_arena_raw) {
     scratch_arena_data = connection_pool[index].client.scratch_arena_data;
     scratch_arena_raw = scratch_arena_data->arena;
 
-    local = scratch_arena_data->local;
     connection = &(connection_pool[index]);
 
     while (PQisBusy(connection->conn)) {
         int _conn_fd = PQsocket(connection->conn);
 
-        printf("busy socket: %d", _conn_fd);
+        printf("busy socket: %d\n", _conn_fd);
 
         if (!PQconsumeInput(connection->conn)) {
-            fprintf(stderr, "PQconsumeInput failed: %s", PQerrorMessage(connection->conn));
+            fprintf(stderr, "PQconsumeInput failed: %s\n", PQerrorMessage(connection->conn));
         }
     }
 
     PGresult *res;
     while ((res = PQgetResult(connection->conn)) != NULL) {
         if (PQresultStatus(res) != PGRES_TUPLES_OK && PQresultStatus(res) != PGRES_COMMAND_OK) {
-            fprintf(stderr, "Query failed: %s", PQerrorMessage(connection->conn));
+            fprintf(stderr, "Query failed: %s\n", PQerrorMessage(connection->conn));
             PQclear(res);
             break;
         }
@@ -1301,6 +1363,26 @@ void home_get(Arena *scratch_arena_raw) {
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
     char *template = get_value("home", sizeof("home"), p_global_arena_data->html.component_dict);
+
+    char *template_cpy = arena_alloc(scratch_arena_raw, strlen(template) + 1);
+    memcpy(template_cpy, template, strlen(template) + 1);
+
+    char _key_value_01[] = "{{ name }}\0Table 1\0{{ sub_name }}\0some long subname";
+    CharsBlock key_value_01;
+    key_value_01.start_addr = _key_value_01;
+    key_value_01.end_addr = &(_key_value_01[sizeof(_key_value_01)]);
+
+    char _key_value_02[] = "{{ name }}\0Table 2\0{{ sub_name }}\0some long subname";
+    CharsBlock key_value_02;
+    key_value_02.start_addr = _key_value_02;
+    key_value_02.end_addr = &(_key_value_02[sizeof(_key_value_02)]);
+
+    char _key_value_03[] = "{{ name }}\0Table 3\0{{ sub_name }}\0some long subname";
+    CharsBlock key_value_03;
+    key_value_03.start_addr = _key_value_03;
+    key_value_03.end_addr = &(_key_value_03[sizeof(_key_value_03)]);
+
+    render(template_cpy, "table", 3, key_value_01, key_value_02, key_value_03);
 
     size_t response_length = strlen(response_headers) + strlen(template);
 
@@ -1340,6 +1422,9 @@ void home_get(Arena *scratch_arena_raw) {
     }
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void not_found(int client_socket) {
     char response[] = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n\r\n"
                       "<html><body><h1>404 Not Found</h1></body></html>";
@@ -1351,6 +1436,9 @@ void not_found(int client_socket) {
     close(client_socket);
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 size_t url_decode_utf8(char **string, size_t length) {
     char *out = *string;
 
@@ -1376,6 +1464,9 @@ size_t url_decode_utf8(char **string, size_t length) {
     return new_len;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 char hex_to_char(char c) {
     if (c >= '0' && c <= '9') {
         return c - '0';
@@ -1393,14 +1484,7 @@ char hex_to_char(char c) {
 }
 
 /**
- * Recursively searches for .html files in a directory and its subdirectories, storing their full
- * paths in the provided buffer.
- *
- * @buffer:            A buffer to store the full paths of located .html files.
- * @base_path:         The directory path where the search begins.
- * @level:             The current recursion depth (used for tracking subdirectory levels).
- * @total_html_files:  A pointer to a counter that tracks the total number of .html files found.
- * @all_paths_length:  A pointer to track the total length of all file paths combined (including null terminators).
+ * TODO: ADD FUNCTION DOCUMENTATION
  */
 char *locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_files, size_t *all_paths_length) {
     DIR *dir = opendir(base_path);
@@ -1436,6 +1520,9 @@ char *locate_files(char *buffer, const char *base_path, const char *extension, u
     return buffer;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void read_file(char **buffer, long *file_size, char *absolute_file_path) {
     FILE *file = fopen(absolute_file_path, "r");
     assert(file != NULL);
@@ -1453,6 +1540,9 @@ void read_file(char **buffer, long *file_size, char *absolute_file_path) {
     fclose(file);
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 String find_http_request_value(const char key[], char *request) {
     String value = {0};
 
@@ -1585,6 +1675,9 @@ String find_http_request_value(const char key[], char *request) {
     return value;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 char *get_value(const char key[], size_t key_length, CharsBlock block) {
     char *ptr = block.start_addr;
     while (ptr < block.end_addr) {
@@ -1600,13 +1693,9 @@ char *get_value(const char key[], size_t key_length, CharsBlock block) {
     return NULL;
 }
 
-void sigint_handler(int signo) {
-    if (signo == SIGINT) {
-        printf("\nReceived SIGINT, exiting program...\n");
-        keep_running = 0;
-    }
-}
-
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 char *load_db_connection_string(const char *filepath) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -1627,6 +1716,9 @@ char *load_db_connection_string(const char *filepath) {
     return connection_string;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 CharsBlock load_env_variables(const char *filepath) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -1791,6 +1883,9 @@ CharsBlock load_env_variables(const char *filepath) {
     return p_global_arena_data->envs;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 CharsBlock load_public_files(const char *base_path) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -1841,6 +1936,9 @@ CharsBlock load_public_files(const char *base_path) {
     return p_global_arena_data->public.file_dict;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 size_t html_minify(char *buffer, char *html, size_t html_length) {
     char *start = buffer;
 
@@ -1928,6 +2026,9 @@ size_t html_minify(char *buffer, char *html, size_t html_length) {
     return length;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 CharsBlock load_html_components(const char *base_path) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -2012,6 +2113,9 @@ CharsBlock load_html_components(const char *base_path) {
     return p_global_arena_data->html.raw.component_dict;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 CharsBlock resolve_html_components_imports() {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -2145,6 +2249,9 @@ CharsBlock resolve_html_components_imports() {
     return p_global_arena_data->html.component_dict;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 Socket *create_server_socket(uint16_t port) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -2177,6 +2284,10 @@ Socket *create_server_socket(uint16_t port) {
     return p_global_arena_data->socket;
 }
 
+/** BUG: Sometimes it does not create all the needed connections on application start up */
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void create_connection_pool(const char *conn_info) {
     uint8_t i;
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
@@ -2232,6 +2343,9 @@ void create_connection_pool(const char *conn_info) {
     }
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 Arena *arena_init(size_t size) {
     Arena *arena = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(arena != NULL);
@@ -2245,6 +2359,9 @@ Arena *arena_init(size_t size) {
     return arena;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void *arena_alloc(Arena *arena, size_t size) {
     if ((uint8_t *)arena->current + size > (uint8_t *)arena->start + arena->size) {
         assert(0);
@@ -2256,6 +2373,9 @@ void *arena_alloc(Arena *arena, size_t size) {
     return ptr;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void arena_reset(Arena *arena, size_t arena_header_size) {
     uint8_t *start = (uint8_t *)arena->start + arena_header_size;
 
@@ -2265,40 +2385,28 @@ void arena_reset(Arena *arena, size_t arena_header_size) {
     arena->current = start;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void arena_free(Arena *arena) {
     if (munmap(arena->start, arena->size) == -1) {
         assert(0);
     }
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void print_query_result(PGresult *query_result) {
-    const int num_columns = PQnfields(query_result);
-    const int num_rows = PQntuples(query_result);
+    PQprintOpt options = {0};          /* Initialize to zero to avoid garbage values */
+    options.header = 1;                /* Print headers */
+    options.align = 1;                 /* Align output nicely */
+    options.html3 = 0;                 /* Don't print HTML table format */
+    options.expanded = 0;              /* Normal table format */
+    options.pager = 0;                 /* Don't use pager */
+    options.fieldSep = " | ";          /* Field separator */
+    options.tableOpt = "border=1";     /* Table option if using HTML */
+    options.caption = "Query Results"; /* Caption for the table */
 
-    int col;
-    int row;
-    int i;
-
-    for (col = 0; col < num_columns; col++) {
-        printf("| %-10s ", PQfname(query_result, col));
-    }
-    printf("|\n");
-
-    printf("|");
-    for (col = 0; col < num_columns; col++) {
-        for (i = 0; i < 12; i++) {
-            printf("-");
-        }
-        printf("|");
-    }
-    printf("\n");
-
-    for (row = 0; row < num_rows; row++) {
-        for (col = 0; col < num_columns; col++) {
-            printf("| %-10s ", PQgetvalue(query_result, row, col));
-        }
-        printf("|\n");
-    }
-
-    printf("\n");
+    PQprint(stdout, query_result, &options);
 }

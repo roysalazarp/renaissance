@@ -3,6 +3,19 @@
         <x-template>Home</x-template>
         <x-template>
             <div>Home page</div>
+            <div>
+                {{ for table }}
+                    <td>{{ name }}</td>
+                    <td>{{ sub_name }}</td>
+                    {{ for rows }}
+                        <div>
+                            {{ for cells }} 
+                                {{ . }} 
+                            {{ end-for cells }}
+                        </div>
+                    {{ end-for rows }}
+                {{ end-for table }}
+            </div>
         </x-template>
     </x-component>
 </x-component-def>
