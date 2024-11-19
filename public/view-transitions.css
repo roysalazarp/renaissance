@@ -32,6 +32,6 @@
 }
 
 /* tie the view transition to a given CSS class */
-.sample-transition {
+.transition-right {
     view-transition-name: slide-it;
 }

@@ -994,6 +994,8 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
         }
     }
 
+    int rows;
+
     PGresult *res;
     while ((res = PQgetResult(connection->conn)) != NULL) {
         if (PQresultStatus(res) != PGRES_TUPLES_OK && PQresultStatus(res) != PGRES_COMMAND_OK) {
@@ -1004,13 +1006,21 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
 
         print_query_result(res);
 
+        rows = PQntuples(res);
         PQclear(res);
+    }
+
+    char *template;
+
+    if (rows > 0) {
+        template = get_value("login-form", sizeof("login-form"), p_global_arena_data->html.component_dict);
+    } else {
+        template = get_value("signup-form", sizeof("signup-form"), p_global_arena_data->html.component_dict);
     }
 
     int client_socket = scratch_arena_data->client_socket;
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-    char *template = get_value("login-form", sizeof("login-form"), p_global_arena_data->html.component_dict);
 
     size_t response_length = strlen(response_headers) + strlen(template);
 
@@ -2039,10 +2049,12 @@ CharsBlock load_public_files(const char *base_path) {
 
         /** File path key */
         strncpy(tmp_public_files, tmp_public_files_paths, strlen(tmp_public_files_paths) + 1);
+        tmp_public_files[strlen(tmp_public_files_paths)] = '\0';
         tmp_public_files += strlen(tmp_public_files_paths) + 1;
 
         /** File content value */
         strncpy(tmp_public_files, file_content, file_size + 1);
+        tmp_public_files[file_size] = '\0';
         tmp_public_files += file_size + 1;
 
         free(file_content);
