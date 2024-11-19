@@ -2,19 +2,25 @@
     <x-component name="root_layout">
         <x-template>Home</x-template>
         <x-template>
-            <div>Home page</div>
             <div>
-                {{ for table }}
-                    <td>{{ name }}</td>
-                    <p>{{ sub_name }}</p>
-                    {{ for rows }}
+                <x-val name="page_name" />
+            </div>
+            <div>
+                <x-for name="table">
+                    <td>
+                        <x-val name="name" />
+                    </td>
+                    <p>
+                        <x-val name="sub_name" />
+                    </p>
+                    <x-for name="rows">
                         <div>
-                            {{ for cells }} 
-                                {{ . }} 
-                            {{ end-for cells }}
+                            <x-for name="cells">
+                                <x-val name="." />
+                            </x-for>
                         </div>
-                    {{ end-for rows }}
-                {{ end-for table }}
+                    </x-for>
+                </x-for>
             </div>
         </x-template>
     </x-component>

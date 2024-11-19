@@ -55,6 +55,13 @@
 #define TEMPLATE_CLOSING_TAG "</x-template>"
 #define SLOT_TAG "<x-slot />"
 
+#define FOR_OPENING_TAG__START "<x-for name=\""
+#define FOR_OPENING_TAG__END "\">"
+#define FOR_CLOSING_TAG "</x-for>"
+
+#define VAL_OPENING_TAG__START "<x-val name=\""
+#define VAL_SELF_CLOSING_TAG__END "\" />"
+
 #define OPENING "{{"
 #define CLOSING "}}"
 
@@ -102,6 +109,16 @@ typedef struct {
     char *before;
     char *after;
 } BlockId;
+
+typedef struct {
+    char *before;
+    char *after;
+} TagLocation;
+
+typedef struct {
+    TagLocation opening_tag;
+    TagLocation closing_tag;
+} BlockLocation;
 
 typedef struct {
     char *db_connection_string;
@@ -169,8 +186,9 @@ CharsBlock load_public_files(const char *base_path);
 CharsBlock load_html_components(const char *base_path);
 CharsBlock resolve_html_components_imports();
 void resolve_slots(char *component_markdown, char *import_statement, char **templates);
-size_t render(char *template, char *scope, int times, ...);
-BlockId find_token(char *string, char *keyword, TokenType token_type);
+BlockLocation find_block(char *template, char *block_name);
+size_t render_val(char *template, char *val_name, char *value);
+size_t render_for(char *template, char *scope, int times, ...);
 size_t html_minify(char *buffer, char *html, size_t html_length);
 
 /** Connection */
@@ -1139,103 +1157,129 @@ void public_get(Arena *scratch_arena_raw, String url) {
     arena_free(scratch_arena_raw);
 }
 
-BlockId find_token(char *string, char *keyword, TokenType token_type) {
-    BlockId token = {0};
+BlockLocation find_block(char *template, char *block_name) {
+    BlockLocation block = {0};
 
-    char *block = NULL;
+    char *ptr = NULL;
 
-    char *for_start = " for";
-    char *for_end = " end-for";
+    while ((ptr = strstr(template, FOR_OPENING_TAG__START)) != NULL) {
+        char *before = ptr;
 
-    char *type;
+        ptr += strlen(FOR_OPENING_TAG__START);
 
-    if (token_type == FOR_START) {
-        type = for_start;
-    } else if (token_type == FOR_END) {
-        type = for_end;
-    } else {
-        assert(0);
+        if (strncmp(ptr, block_name, strlen(block_name)) == 0) {
+            char *after = ptr + strlen(block_name) + strlen(FOR_OPENING_TAG__END);
+
+            block.opening_tag.before = before;
+            block.opening_tag.after = after;
+
+            uint8_t inside = 0;
+            while (*ptr != '\0') {
+                if (strncmp(ptr, FOR_OPENING_TAG__START, strlen(FOR_OPENING_TAG__START)) == 0) {
+                    inside++;
+                }
+
+                if (strncmp(ptr, FOR_CLOSING_TAG, strlen(FOR_CLOSING_TAG)) == 0) {
+                    if (inside > 0) {
+                        inside--;
+                    } else {
+                        block.closing_tag.before = ptr;
+                        block.closing_tag.after = ptr + strlen(FOR_CLOSING_TAG);
+
+                        return block;
+                    }
+                }
+
+                ptr++;
+            }
+        }
     }
 
-    char *tmp_template = string;
-    while (*tmp_template != '\0') {
-        if (strncmp(tmp_template, keyword, strlen(keyword)) == 0) {
-            char *before_block_name = tmp_template - 1;
-            char *after_block_name = tmp_template + strlen(keyword);
+    return block;
+}
 
-            while (before_block_name > string) {
-                if (isspace(*before_block_name)) {
-                    before_block_name--;
-                    continue;
-                } else if (strncmp(before_block_name + 1 - strlen(type), type, strlen(type)) == 0) {
-                    printf("Previous word IS \"for\"\n");
-                    char *before_for = before_block_name + 1 - strlen(type);
+size_t render_val(char *template, char *val_name, char *value) {
+    char *ptr = template;
+    uint8_t inside = 0;
+    while (*ptr != '\0') {
+        if (strncmp(ptr, FOR_OPENING_TAG__START, strlen(FOR_OPENING_TAG__START)) == 0) {
+            inside++;
+        }
 
-                    while (before_for > string) {
-                        if (isspace(*before_for)) {
-                            before_for--;
-                            continue;
-                        } else if (strncmp(before_for + 1 - strlen("{{"), "{{", strlen("{{")) == 0) {
-                            printf("Previous word IS \"{{\"\n");
+        if (strncmp(ptr, FOR_CLOSING_TAG, strlen(FOR_CLOSING_TAG)) == 0) {
+            if (inside > 0) {
+                inside--;
+            } else {
+                assert(0);
+            }
+        }
 
-                            while (*after_block_name != '\0') {
-                                if (isspace(*after_block_name)) {
-                                    after_block_name++;
-                                    continue;
-                                } else if (strncmp(after_block_name, "}}", strlen("}}")) == 0) {
-                                    printf("Next after block name IS \"}}\"\n");
+        if (strncmp(ptr, VAL_OPENING_TAG__START, strlen(VAL_OPENING_TAG__START)) == 0) {
+            if (inside == 0) {
+                size_t val_name_length = 0;
+                char *val_name = ptr + strlen(VAL_OPENING_TAG__START);
+                char *tmp = val_name;
+                tmp++;
 
-                                    token.before = before_for + 1 - strlen("{{");
-                                    token.after = after_block_name + strlen("}}");
+                while (*tmp != '"') {
+                    val_name_length++;
+                    tmp++;
+                }
 
-                                    goto exit;
-                                } else {
-                                    printf("Next after block name IS NOT \"}}\"\n");
-                                    break;
-                                }
-                            }
-                        } else {
-                            printf("Previous word IS NOT \"{{\"\n");
-                            break;
-                        }
+                TagLocation val_tag = {0};
+                val_tag.before = ptr;
+                val_tag.after = ptr + strlen(VAL_OPENING_TAG__START) + val_name_length + strlen(VAL_SELF_CLOSING_TAG__END) + 1;
+
+                if (value) {
+                    size_t val_length = strlen(value);
+
+                    memmove(ptr + val_length, val_tag.after, strlen(val_tag.after) + 1);
+                    memcpy(ptr, value, val_length);
+
+                    ptr += strlen(ptr) + 1;
+
+                    /** Clean up memory */
+                    while (*ptr != '\0') {
+                        *ptr = '\0';
+                        ptr++;
                     }
-                } else {
-                    printf("Previous word IS NOT \"for\"\n");
-                    break;
+
+                    return strlen(template);
                 }
             }
         }
 
-        tmp_template++;
+        ptr++;
     }
 
-exit:
-    return token;
+    assert(0);
 }
 
-size_t render(char *template, char *block_name, int times, ...) {
+size_t render_for(char *template, char *block_name, int times, ...) {
     va_list args;
     CharsBlock key_value = {0};
 
-    BlockId block_start = find_token(template, block_name, FOR_START);
-    BlockId block_end = find_token(template, block_name, FOR_END);
+    BlockLocation block = find_block(template, block_name);
 
-    size_t block_length = block_end.before - block_start.after;
+    if (!block.opening_tag.before || !block.opening_tag.after || !block.closing_tag.before || !block.closing_tag.after) {
+        /** Didn't find block */
+        return strlen(template);
+    }
+
+    size_t block_length = block.closing_tag.before - block.opening_tag.after;
 
     char *block_copy = (char *)malloc((block_length + 1) * sizeof(char));
-    memcpy(block_copy, block_start.after, block_length);
+    memcpy(block_copy, block.opening_tag.after, block_length);
     block_copy[block_length] = '\0';
     char *block_copy_end = block_copy + block_length;
 
-    char *start = block_start.before;
-    char *after = block_end.after;
+    char *start = block.opening_tag.before;
+    char *after = block.closing_tag.after;
 
-    size_t after_copy_lenght = strlen(after);
+    size_t after_copy_lenght = strlen(block.closing_tag.after);
     char *after_copy = (char *)malloc((after_copy_lenght + 1) * sizeof(char));
-    memcpy(after_copy, after, after_copy_lenght);
+    memcpy(after_copy, block.closing_tag.after, after_copy_lenght);
     after_copy[after_copy_lenght] = '\0';
-
-    size_t room = block_end.after - block_start.before;
 
     va_start(args, times);
 
@@ -1243,56 +1287,55 @@ size_t render(char *template, char *block_name, int times, ...) {
     for (i = 0; i < times; i++) {
         key_value = va_arg(args, CharsBlock);
 
-        char *tmp_block_copy = block_copy;
+        char *ptr = block_copy;
+        uint8_t inside = 0;
+        while (ptr < block_copy_end) {
+            if (strncmp(ptr, FOR_OPENING_TAG__START, strlen(FOR_OPENING_TAG__START)) == 0) {
+                inside++;
+            }
 
-        while (tmp_block_copy < block_copy_end) {
-            if (strncmp(tmp_block_copy, "{{", strlen("{{")) == 0) {
-                char *token = tmp_block_copy + strlen("{{");
-
-                char *token_start;
-                char *token_end;
-
-                while (isspace(*token)) {
-                    token++;
+            if (strncmp(ptr, FOR_CLOSING_TAG, strlen(FOR_CLOSING_TAG)) == 0) {
+                if (inside > 0) {
+                    inside--;
+                } else {
+                    assert(0);
                 }
+            }
 
-                token_start = token;
+            if (strncmp(ptr, VAL_OPENING_TAG__START, strlen(VAL_OPENING_TAG__START)) == 0) {
+                if (inside == 0) {
+                    size_t val_name_length = 0;
+                    char *val_name = ptr + strlen(VAL_OPENING_TAG__START);
+                    char *tmp = val_name;
+                    tmp++;
 
-                while (!isspace(*token)) {
-                    token++;
-                }
+                    while (*tmp != '"') {
+                        val_name_length++;
+                        tmp++;
+                    }
 
-                token_end = token;
+                    TagLocation val_tag = {0};
+                    val_tag.before = ptr;
+                    val_tag.after = ptr + strlen(VAL_OPENING_TAG__START) + val_name_length + strlen(VAL_SELF_CLOSING_TAG__END) + 1;
 
-                while (isspace(*token)) {
-                    token++;
-                }
+                    char *value = get_value(val_name, val_name_length, key_value);
 
-                if (strncmp(token, "}}", strlen("}}")) == 0) {
-                    token += strlen("}}");
-                    size_t length = token_end - token_start;
+                    if (value) {
+                        size_t val_length = strlen(value);
+                        memcpy(start, value, val_length);
 
-                    if (key_value.start_addr && key_value.end_addr) {
-                        char *value = get_value(token_start, length, key_value);
+                        ptr = val_tag.after;
+                        start += val_length;
 
-                        if (value) {
-                            size_t val_length = strlen(value);
-                            memcpy(start, value, val_length);
-
-                            tmp_block_copy = token;
-                            start += val_length;
-
-                            printf("\n");
-                            continue;
-                        }
+                        continue;
                     }
                 }
             }
 
-            *start = *tmp_block_copy;
+            *start = *ptr;
 
             start++;
-            tmp_block_copy++;
+            ptr++;
         }
 
         after = start;
@@ -1305,9 +1348,8 @@ size_t render(char *template, char *block_name, int times, ...) {
     char *p = start + after_copy_lenght + 1;
     while (*p != '\0') {
         *p = '\0';
+        p++;
     }
-
-    printf("\n");
 
     va_end(args);
 
@@ -1435,38 +1477,39 @@ void home_get(Arena *scratch_arena_raw) {
 
     CharsBlock empty = {0};
 
-    render(template_cpy, "table", 3, key_value_01, key_value_02, key_value_03);
+    render_val(template_cpy, "page_name", "Home page!");
 
-    render(template_cpy, "rows", 2, empty, empty);
-    render(template_cpy, "cells", 3, empty, empty, empty);
-    render(template_cpy, "cells", 1, empty);
+    render_for(template_cpy, "table", 3, key_value_01, key_value_02, key_value_03);
 
-    render(template_cpy, "rows", 5, empty, empty, empty, empty, empty);
-    render(template_cpy, "cells", 4, empty, empty, empty);
-    render(template_cpy, "cells", 1, empty);
-    render(template_cpy, "cells", 1, empty);
-    render(template_cpy, "cells", 2, empty, empty, empty);
-    render(template_cpy, "cells", 1, empty);
+    render_for(template_cpy, "rows", 2, empty, empty);
+    render_for(template_cpy, "cells", 3, empty, empty, empty);
+    render_for(template_cpy, "cells", 0);
 
-    render(template_cpy, "rows", 3, empty, empty, empty);
-    render(template_cpy, "cells", 1, empty);
-    render(template_cpy, "cells", 1, empty);
-    render(template_cpy, "cells", 1, empty);
+    render_for(template_cpy, "rows", 5, empty, empty, empty, empty, empty);
+    render_for(template_cpy, "cells", 4, empty, empty, empty, empty);
+    render_for(template_cpy, "cells", 0);
+    render_for(template_cpy, "cells", 0);
+    render_for(template_cpy, "cells", 2, empty, empty);
+    render_for(template_cpy, "cells", 1, empty);
 
-    /* TODO: add support for (0 times) -> render(template_cpy, "cells", 0); */
+    render_for(template_cpy, "rows", 3, empty, empty, empty);
+    render_for(template_cpy, "cells", 1, empty);
+    render_for(template_cpy, "cells", 1, empty);
+
+    char _key_value[] = ".\0my val";
+    CharsBlock key_value;
+    key_value.start_addr = _key_value;
+    key_value.end_addr = &(_key_value[sizeof(_key_value)]);
+
+    render_for(template_cpy, "cells", 1, key_value);
 
     scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
 
-    char *response_html_minified = (char *)scratch_arena_raw->current;
-    html_minify(response_html_minified, template_cpy, strlen(template_cpy));
-
-    scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(response_html_minified) + 1;
-
-    size_t response_length = strlen(response_headers) + strlen(response_html_minified);
+    size_t response_length = strlen(response_headers) + strlen(template_cpy);
 
     char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
 
-    sprintf(response, "%s%s", response_headers, response_html_minified);
+    sprintf(response, "%s%s", response_headers, template_cpy);
     response[response_length] = '\0';
 
     int resl = send(scratch_arena_data->client_socket, response, strlen(response), 0);
@@ -2487,4 +2530,177 @@ void print_query_result(PGresult *query_result) {
     options.caption = "Query Results"; /* Caption for the table */
 
     PQprint(stdout, query_result, &options);
+}
+
+BlockId old_find_token(char *string, char *keyword, TokenType token_type) {
+    BlockId token = {0};
+
+    char *block = NULL;
+
+    char *for_start = " for";
+    char *for_end = " end-for";
+
+    char *type;
+
+    if (token_type == FOR_START) {
+        type = for_start;
+    } else if (token_type == FOR_END) {
+        type = for_end;
+    } else {
+        assert(0);
+    }
+
+    char *tmp_template = string;
+    while (*tmp_template != '\0') {
+        if (strncmp(tmp_template, keyword, strlen(keyword)) == 0) {
+            char *before_block_name = tmp_template - 1;
+            char *after_block_name = tmp_template + strlen(keyword);
+
+            while (before_block_name > string) {
+                if (isspace(*before_block_name)) {
+                    before_block_name--;
+                    continue;
+                } else if (strncmp(before_block_name + 1 - strlen(type), type, strlen(type)) == 0) {
+                    printf("Previous word IS \"for\"\n");
+                    char *before_for = before_block_name + 1 - strlen(type);
+
+                    while (before_for > string) {
+                        if (isspace(*before_for)) {
+                            before_for--;
+                            continue;
+                        } else if (strncmp(before_for + 1 - strlen("{{"), "{{", strlen("{{")) == 0) {
+                            printf("Previous word IS \"{{\"\n");
+
+                            while (*after_block_name != '\0') {
+                                if (isspace(*after_block_name)) {
+                                    after_block_name++;
+                                    continue;
+                                } else if (strncmp(after_block_name, "}}", strlen("}}")) == 0) {
+                                    printf("Next after block name IS \"}}\"\n");
+
+                                    token.before = before_for + 1 - strlen("{{");
+                                    token.after = after_block_name + strlen("}}");
+
+                                    goto exit;
+                                } else {
+                                    printf("Next after block name IS NOT \"}}\"\n");
+                                    break;
+                                }
+                            }
+                        } else {
+                            printf("Previous word IS NOT \"{{\"\n");
+                            break;
+                        }
+                    }
+                } else {
+                    printf("Previous word IS NOT \"for\"\n");
+                    break;
+                }
+            }
+        }
+
+        tmp_template++;
+    }
+
+exit:
+    return token;
+}
+
+size_t old_render(char *template, char *block_name, int times, ...) {
+    va_list args;
+    CharsBlock key_value = {0};
+
+    BlockId block_start = old_find_token(template, block_name, FOR_START);
+    BlockId block_end = old_find_token(template, block_name, FOR_END);
+
+    size_t block_length = block_end.before - block_start.after;
+
+    char *block_copy = (char *)malloc((block_length + 1) * sizeof(char));
+    memcpy(block_copy, block_start.after, block_length);
+    block_copy[block_length] = '\0';
+    char *block_copy_end = block_copy + block_length;
+
+    char *start = block_start.before;
+    char *after = block_end.after;
+
+    size_t after_copy_lenght = strlen(after);
+    char *after_copy = (char *)malloc((after_copy_lenght + 1) * sizeof(char));
+    memcpy(after_copy, after, after_copy_lenght);
+    after_copy[after_copy_lenght] = '\0';
+
+    va_start(args, times);
+
+    int i;
+    for (i = 0; i < times; i++) {
+        key_value = va_arg(args, CharsBlock);
+
+        char *tmp_block_copy = block_copy;
+
+        while (tmp_block_copy < block_copy_end) {
+            if (strncmp(tmp_block_copy, "{{", strlen("{{")) == 0) {
+                char *token = tmp_block_copy + strlen("{{");
+
+                char *token_start;
+                char *token_end;
+
+                while (isspace(*token)) {
+                    token++;
+                }
+
+                token_start = token;
+
+                while (!isspace(*token)) {
+                    token++;
+                }
+
+                token_end = token;
+
+                while (isspace(*token)) {
+                    token++;
+                }
+
+                if (strncmp(token, "}}", strlen("}}")) == 0) {
+                    token += strlen("}}");
+                    size_t length = token_end - token_start;
+
+                    if (key_value.start_addr && key_value.end_addr) {
+                        char *value = get_value(token_start, length, key_value);
+
+                        if (value) {
+                            size_t val_length = strlen(value);
+                            memcpy(start, value, val_length);
+
+                            tmp_block_copy = token;
+                            start += val_length;
+
+                            printf("\n");
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            *start = *tmp_block_copy;
+
+            start++;
+            tmp_block_copy++;
+        }
+
+        after = start;
+    }
+
+    memcpy(start, after_copy, after_copy_lenght);
+    start[after_copy_lenght] = '\0';
+
+    /** Clean up memory */
+    char *p = start + after_copy_lenght + 1;
+    while (*p != '\0') {
+        *p = '\0';
+    }
+
+    printf("\n");
+
+    va_end(args);
+
+    return strlen(template);
 }
