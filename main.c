@@ -206,9 +206,8 @@ void home_get(Arena *scratch_arena_raw);
 void not_found(int client_socket);
 void public_get(Arena *scratch_arena_raw, String url);
 void view_get(Arena *scratch_arena_raw, char *view, CharsBlock replaces);
-void sign_up_get(Arena *scratch_arena_raw);
-void sign_up_create_user_post(Arena *scratch_arena_raw);
 void auth_validate_email_post(Arena *scratch_arena_raw);
+void register_create_account_post(Arena *scratch_arena_raw);
 
 /** Request utils */
 String find_http_request_value(const char key[], char *request);
@@ -608,7 +607,7 @@ void router(Arena *scratch_arena_raw) {
         }
     }
 
-    if (strncmp(url.start_addr, URL("/signup"), strlen(URL("/signup"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/signup"), strlen(URL_WITH_QUERY("/signup"))) == 0) {
+    if (strncmp(url.start_addr, URL("/register"), strlen(URL("/register"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/register"), strlen(URL_WITH_QUERY("/register"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
             String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request.start_addr);
             CharsBlock replaces = {0};
@@ -617,14 +616,15 @@ void router(Arena *scratch_arena_raw) {
                 replaces = parse_and_decode_query_params(scratch_arena_raw, query_params);
             }
 
-            view_get(scratch_arena_raw, "signup", replaces);
+            view_get(scratch_arena_raw, "register", replaces);
             return;
         }
     }
 
-    if (strncmp(url.start_addr, URL("/"), strlen(URL("/"))) == 0) {
-        if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            home_get(scratch_arena_raw);
+    if (strncmp(url.start_addr, URL("/register/create-account"), strlen(URL("/register/create-account"))) == 0) {
+        if (strncmp(method.start_addr, "POST", method.length) == 0) {
+
+            register_create_account_post(scratch_arena_raw);
             return;
         }
     }
@@ -650,20 +650,6 @@ void router(Arena *scratch_arena_raw) {
     if (strncmp(url.start_addr, URL("/auth/validate-email"), strlen(URL("/auth/validate-email"))) == 0) {
         if (strncmp(method.start_addr, "POST", method.length) == 0) {
             auth_validate_email_post(scratch_arena_raw);
-            return;
-        }
-    }
-
-    if (strncmp(url.start_addr, URL("/sign-up"), strlen(URL("/sign-up"))) == 0) {
-        if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            sign_up_get(scratch_arena_raw);
-            return;
-        }
-    }
-
-    if (strncmp(url.start_addr, URL("/sign-up/create-user"), strlen(URL("/sign-up/create-user"))) == 0) {
-        if (strncmp(method.start_addr, "POST", method.length) == 0) {
-            sign_up_create_user_post(scratch_arena_raw);
             return;
         }
     }
@@ -836,41 +822,6 @@ void resolve_slots(char *component_markdown, char *import_statement, char **temp
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-void sign_up_create_user_post(Arena *scratch_arena_raw) {
-    /** Process signup */
-
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
-
-    char *body = find_body(scratch_arena_data->request);
-
-    CharsBlock email = parse_body_value("email", body);
-    CharsBlock password = parse_body_value("password", body);
-    CharsBlock repeat_password = parse_body_value("repeat_password", body);
-
-    printf("%s\n", body);
-
-    printf("%.*s\n", (int)(email.end_addr - email.start_addr), email.start_addr);
-    /** TODO: Validate whether email satisfies required format */
-    /** TODO: Validate whether email already exists in the db */
-
-    printf("%.*s\n", (int)(password.end_addr - password.start_addr), password.start_addr);
-    printf("%.*s\n", (int)(repeat_password.end_addr - repeat_password.start_addr), repeat_password.start_addr);
-
-    int client_socket = scratch_arena_data->client_socket;
-
-    char response[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-
-    if (send(client_socket, response, strlen(response), 0) == -1) {
-        /** TODO: Write error to logs */
-    }
-
-    close(client_socket);
-}
-
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 char *find_body(CharsBlock request) {
     char *body = request.start_addr;
 
@@ -1021,6 +972,144 @@ QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
     assert(0);
 }
 
+void register_create_account_post(Arena *scratch_arena_raw) {
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+
+    DBConnection *connection = get_connection(scratch_arena_raw);
+
+    if (connection == NULL) {
+        QueuedRequest *queued = put_in_queue(scratch_arena_raw);
+
+        int r = setjmp(queued->client.jmp_buf);
+        if (r == 0) {
+            longjmp(ctx, 1);
+        }
+
+        int index = from_index(r);
+
+        connection = &(connection_pool[index]);
+
+        scratch_arena_data = connection->client.scratch_arena_data;
+        scratch_arena_raw = scratch_arena_data->arena;
+    }
+
+    assert(connection != NULL);
+
+    char *body = find_body(scratch_arena_data->request);
+
+    CharsBlock encoded_email = parse_body_value("email", body);
+    size_t encoded_email_length = encoded_email.end_addr - encoded_email.start_addr;
+
+    char *email = (char *)arena_alloc(scratch_arena_raw, encoded_email_length);
+    memcpy(email, encoded_email.start_addr, encoded_email_length);
+    url_decode_utf8(&email, encoded_email_length);
+
+    CharsBlock password = parse_body_value("password", body);
+    size_t password_length = password.end_addr - password.start_addr;
+
+    char *user_password = (char *)arena_alloc(scratch_arena_raw, password_length);
+    memcpy(user_password, password.start_addr, password_length);
+
+    const char *command = "INSERT INTO app.users (email, password) VALUES ($1, $2)";
+    Oid paramTypes[2] = {25, 25};
+    const char *paramValues[2];
+    paramValues[0] = email;
+    paramValues[1] = user_password;
+    int paramLengths[2] = {0, 0};
+    int paramFormats[2] = {0, 0};
+    int resultFormat = 0;
+
+    if (PQsendQueryParams(connection->conn, command, 2, paramTypes, paramValues, paramLengths, paramFormats, resultFormat) == 0) {
+        fprintf(stderr, "Query failed to send: %s\n", PQerrorMessage(connection->conn));
+        int _conn_fd = PQsocket(connection->conn);
+        printf("socket: %d", _conn_fd);
+    }
+
+    int _conn_fd = PQsocket(connection->conn);
+
+    event.events = EPOLLIN | EPOLLET;
+    event.data.ptr = connection;
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, _conn_fd, &event);
+
+    int index;
+
+    if (connection->client.queued) {
+        int r = setjmp(connection->client.jmp_buf);
+        if (r == 0) {
+            longjmp(db_ctx, 1);
+        }
+
+        index = from_index(r);
+    } else {
+        int r = setjmp(connection->client.jmp_buf);
+        if (r == 0) {
+            longjmp(ctx, 1);
+        }
+
+        index = from_index(r);
+    }
+
+    scratch_arena_data = connection_pool[index].client.scratch_arena_data;
+    scratch_arena_raw = scratch_arena_data->arena;
+
+    connection = &(connection_pool[index]);
+
+    while (PQisBusy(connection->conn)) {
+        int _conn_fd = PQsocket(connection->conn);
+
+        printf("busy socket: %d\n", _conn_fd);
+
+        if (!PQconsumeInput(connection->conn)) {
+            fprintf(stderr, "PQconsumeInput failed: %s\n", PQerrorMessage(connection->conn));
+        }
+    }
+
+    int rows;
+
+    PGresult *res;
+    while ((res = PQgetResult(connection->conn)) != NULL) {
+        if (PQresultStatus(res) != PGRES_TUPLES_OK && PQresultStatus(res) != PGRES_COMMAND_OK) {
+            fprintf(stderr, "Query failed: %s\n", PQerrorMessage(connection->conn));
+            PQclear(res);
+            break;
+        }
+
+        print_query_result(res);
+
+        rows = PQntuples(res);
+        PQclear(res);
+    }
+
+    char response_headers[] = "HTTP/1.1 200 OK\r\nHX-Redirect: /\r\n\r\n";
+
+    int client_socket = scratch_arena_data->client_socket;
+
+    if (send(client_socket, response_headers, strlen((char *)response_headers), 0) == -1) {
+    }
+
+    close(scratch_arena_data->client_socket);
+
+    uint8_t was_queued = connection->client.queued;
+
+    /* release connection for others to use */
+    memset(&(connection->client), 0, sizeof(Client));
+
+    int conn_fd = PQsocket(connection->conn);
+
+    event.events = EPOLLOUT | EPOLLET;
+    event.data.ptr = connection;
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_fd, &event);
+
+    arena_free(scratch_arena_raw);
+
+    if (was_queued) {
+        longjmp(db_ctx, 1); /** Jump back */
+    } else {
+        longjmp(ctx, 1); /** Jump back */
+    }
+}
+
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
@@ -1049,8 +1138,6 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
     assert(connection != NULL);
 
     char *body = find_body(scratch_arena_data->request);
-
-    /** IMPORTANT: Test with email test@example.com */
 
     CharsBlock encoded_email = parse_body_value("email", body);
     size_t encoded_email_length = encoded_email.end_addr - encoded_email.start_addr;
@@ -1141,7 +1228,7 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
     if (rows > 0) {
         sprintf((char *)response_headers, "HTTP/1.1 200 OK\r\nHX-Redirect: /login?email=%s\r\n\r\n", my_encoded_email);
     } else {
-        sprintf((char *)response_headers, "HTTP/1.1 200 OK\r\nHX-Redirect: /signup?email=%s\r\n\r\n", my_encoded_email);
+        sprintf((char *)response_headers, "HTTP/1.1 200 OK\r\nHX-Redirect: /register?email=%s\r\n\r\n", my_encoded_email);
     }
 
     int client_socket = scratch_arena_data->client_socket;
@@ -1169,34 +1256,6 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
     } else {
         longjmp(ctx, 1); /** Jump back */
     }
-}
-
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
-void sign_up_get(Arena *scratch_arena_raw) {
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
-
-    int client_socket = scratch_arena_data->client_socket;
-
-    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-    char *template = get_value("sign-up", sizeof("sign-up"), p_global_arena_data->html.component_dict);
-
-    size_t response_length = strlen(response_headers) + strlen(template);
-
-    char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
-
-    sprintf(response, "%s%s", response_headers, template);
-    response[response_length] = '\0';
-
-    if (send(client_socket, response, strlen(response), 0) == -1) {
-        /** TODO: Write error to logs */
-    }
-
-    close(client_socket);
-
-    arena_free(scratch_arena_raw);
 }
 
 /**
@@ -2637,7 +2696,7 @@ void create_connection_pool(const char *conn_info) {
 
             int fd = PQsocket(connection_pool[i].conn);
 
-            event.events = EPOLLOUT | EPOLLET;
+            event.events = EPOLLOUT;
             event.data.ptr = &(connection_pool[i]);
             assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event) != -1);
         } else {
@@ -2660,11 +2719,11 @@ void create_connection_pool(const char *conn_info) {
                 int fd = PQsocket(connection->conn);
 
                 if (poll_status == PGRES_POLLING_READING) {
-                    event.events = EPOLLIN | EPOLLET;
+                    event.events = EPOLLIN;
                     event.data.ptr = connection;
                     epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event);
                 } else if (poll_status == PGRES_POLLING_WRITING) {
-                    event.events = EPOLLOUT | EPOLLET;
+                    event.events = EPOLLOUT;
                     event.data.ptr = connection;
                     epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event);
                 } else if (poll_status == PGRES_POLLING_OK) {
