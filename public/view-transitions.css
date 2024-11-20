@@ -22,6 +22,27 @@
     }
 }
 
+@keyframes slide-from-left {
+    from {
+        transform: translateX(-100vw);
+    }
+}
+
+@keyframes slide-to-right {
+    to {
+        transform: translateX(100vw);
+    }
+}
+
+/* define animations for the old and new content */
+::view-transition-old(slide-it-reverse) {
+    animation: 420ms cubic-bezier(0.4, 0, 1, 1) both slide-to-right, 600ms cubic-bezier(0.4, 0, 0.2, 1) both slide-to-right;
+}
+
+::view-transition-new(slide-it-reverse) {
+    animation: 420ms cubic-bezier(0, 0, 0.2, 1) 90ms both slide-from-left, 600ms cubic-bezier(0.4, 0, 0.2, 1) both slide-from-left;
+}
+
 /* define animations for the old and new content */
 ::view-transition-old(slide-it) {
     animation: 420ms cubic-bezier(0.4, 0, 1, 1) both slide-to-left, 600ms cubic-bezier(0.4, 0, 0.2, 1) both slide-to-left;
@@ -34,4 +55,9 @@
 /* tie the view transition to a given CSS class */
 .transition-right {
     view-transition-name: slide-it;
+}
+
+/* tie the view transition to a given CSS class */
+.transition-left {
+    view-transition-name: slide-it-reverse;
 }

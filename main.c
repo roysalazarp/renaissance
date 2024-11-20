@@ -66,6 +66,7 @@
 #define CLOSING "}}"
 
 #define URL(path) path "\x20"
+#define URL_WITH_QUERY(path) path "?"
 
 /*
 +-----------------------------------------------------------------------------------+
@@ -189,6 +190,7 @@ void resolve_slots(char *component_markdown, char *import_statement, char **temp
 BlockLocation find_block(char *template, char *block_name);
 size_t render_val(char *template, char *val_name, char *value);
 size_t render_for(char *template, char *scope, int times, ...);
+size_t replace_val(char *template, char *val_name, char *value);
 size_t html_minify(char *buffer, char *html, size_t html_length);
 
 /** Connection */
@@ -203,7 +205,7 @@ void router(Arena *scratch_arena_raw);
 void home_get(Arena *scratch_arena_raw);
 void not_found(int client_socket);
 void public_get(Arena *scratch_arena_raw, String url);
-void view_get(Arena *scratch_arena_raw, char *view);
+void view_get(Arena *scratch_arena_raw, char *view, CharsBlock replaces);
 void sign_up_get(Arena *scratch_arena_raw);
 void sign_up_create_user_post(Arena *scratch_arena_raw);
 void auth_validate_email_post(Arena *scratch_arena_raw);
@@ -215,6 +217,9 @@ char *find_body(CharsBlock request);
 CharsBlock parse_body_value(const char key_name[], char *request_body);
 char *file_content_type(Arena *scratch_arena_raw, const char *path);
 size_t url_decode_utf8(char **string, size_t length);
+CharsBlock parse_and_decode_query_params(Arena *scratch_arena_raw, String raw_query_params);
+char char_to_hex(unsigned char nibble);
+size_t url_encode_utf8(char **string, size_t length);
 
 /** Utils */
 CharsBlock load_env_variables(const char *filepath);
@@ -589,9 +594,55 @@ void router(Arena *scratch_arena_raw) {
         }
     }
 
-    if (strncmp(url.start_addr, URL("/auth"), strlen(URL("/auth"))) == 0) {
+    if (strncmp(url.start_addr, URL("/login"), strlen(URL("/login"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/login"), strlen(URL_WITH_QUERY("/login"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            view_get(scratch_arena_raw, "auth");
+            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request.start_addr);
+            CharsBlock replaces = {0};
+
+            if (query_params.length > 0) {
+                replaces = parse_and_decode_query_params(scratch_arena_raw, query_params);
+            }
+
+            view_get(scratch_arena_raw, "login", replaces);
+            return;
+        }
+    }
+
+    if (strncmp(url.start_addr, URL("/signup"), strlen(URL("/signup"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/signup"), strlen(URL_WITH_QUERY("/signup"))) == 0) {
+        if (strncmp(method.start_addr, "GET", method.length) == 0) {
+            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request.start_addr);
+            CharsBlock replaces = {0};
+
+            if (query_params.length > 0) {
+                replaces = parse_and_decode_query_params(scratch_arena_raw, query_params);
+            }
+
+            view_get(scratch_arena_raw, "signup", replaces);
+            return;
+        }
+    }
+
+    if (strncmp(url.start_addr, URL("/"), strlen(URL("/"))) == 0) {
+        if (strncmp(method.start_addr, "GET", method.length) == 0) {
+            home_get(scratch_arena_raw);
+            return;
+        }
+    }
+
+    if (strncmp(url.start_addr, URL("/auth"), strlen(URL("/auth"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/auth"), strlen(URL_WITH_QUERY("/auth"))) == 0) {
+        if (strncmp(method.start_addr, "GET", method.length) == 0) {
+            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request.start_addr);
+
+            CharsBlock replaces;
+            if (query_params.length > 0) {
+                replaces = parse_and_decode_query_params(scratch_arena_raw, query_params);
+            } else {
+                char key_value_01[] = "transition_direction\0transition-left";
+                replaces.start_addr = key_value_01;
+                replaces.end_addr = &(key_value_01[sizeof(key_value_01)]);
+            }
+
+            view_get(scratch_arena_raw, "auth", replaces);
             return;
         }
     }
@@ -619,6 +670,57 @@ void router(Arena *scratch_arena_raw) {
 
     not_found(client_socket);
     return;
+}
+
+CharsBlock parse_and_decode_query_params(Arena *scratch_arena_raw, String raw_query_params) {
+    CharsBlock key_value = {0};
+
+    if (raw_query_params.length == 0) {
+        return key_value;
+    }
+
+    char *ptr = raw_query_params.start_addr;
+    char *raw_query_end = raw_query_params.start_addr + raw_query_params.length;
+
+    char *start = (char *)scratch_arena_raw->current;
+    key_value.start_addr = start;
+
+    ptr++; /** skip '?' */
+
+    while (ptr < raw_query_end) {
+        char *key = ptr;
+        char *key_end = key;
+        while (*key_end != '=') {
+            key_end++;
+        }
+
+        size_t key_length = key_end - key;
+        memcpy(start, key, key_length);
+        start += key_length;
+        *start = '\0';
+        start++;
+
+        char *val = key_end + 1;
+        char *val_end = val;
+        while (*val_end != '&' && !isspace(*val_end)) {
+            val_end++;
+        }
+
+        size_t val_length = val_end - val;
+        memcpy(start, val, val_length);
+        size_t new_val_length = url_decode_utf8(&start, val_length);
+        start += new_val_length;
+        *start = '\0';
+        start++;
+
+        ptr = val_end + 1;
+    }
+
+    key_value.end_addr = start - 1;
+
+    scratch_arena_raw->current = start;
+
+    return key_value;
 }
 
 /**
@@ -826,7 +928,7 @@ CharsBlock parse_body_value(const char key_name[], char *request_body) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-void view_get(Arena *scratch_arena_raw, char *view) {
+void view_get(Arena *scratch_arena_raw, char *view, CharsBlock replaces) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
@@ -835,11 +937,27 @@ void view_get(Arena *scratch_arena_raw, char *view) {
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
     char *template = get_value(view, strlen(view), p_global_arena_data->html.component_dict);
 
-    size_t response_length = strlen(response_headers) + strlen(template);
+    char *template_cpy = (char *)scratch_arena_raw->current;
+    memcpy(template_cpy, template, strlen(template) + 1);
+
+    char *ptr = replaces.start_addr;
+    while (ptr < replaces.end_addr) {
+        char *key = ptr;
+        char *value = ptr + strlen(ptr) + 1;
+
+        replace_val(template_cpy, key, value);
+
+        ptr += strlen(ptr) + 1; /* pass key */
+        ptr += strlen(ptr) + 1; /* pass value */
+    }
+
+    scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
+
+    size_t response_length = strlen(response_headers) + strlen(template_cpy);
 
     char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
 
-    sprintf(response, "%s%s", response_headers, template);
+    sprintf(response, "%s%s", response_headers, template_cpy);
     response[response_length] = '\0';
 
     if (send(client_socket, response, strlen(response), 0) == -1) {
@@ -941,7 +1059,7 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
     memcpy(email, encoded_email.start_addr, encoded_email_length);
     url_decode_utf8(&email, encoded_email_length);
 
-    const char *command = "SELECT * FROM app.users WHERE email = $1";
+    const char *command = "SELECT email FROM app.users WHERE email = $1";
     Oid paramTypes[1] = {25};
     const char *paramValues[1];
     paramValues[0] = email;
@@ -1010,27 +1128,25 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
         PQclear(res);
     }
 
-    char *template;
+    char *response_headers[200];
+
+    char _encoded_email[100];
+    char *my_encoded_email = _encoded_email;
+
+    memset(my_encoded_email, 0, 100);
+    memcpy(my_encoded_email, email, strlen(email));
+
+    size_t new_len = url_encode_utf8(&my_encoded_email, strlen(my_encoded_email));
 
     if (rows > 0) {
-        template = get_value("login-form", sizeof("login-form"), p_global_arena_data->html.component_dict);
+        sprintf((char *)response_headers, "HTTP/1.1 200 OK\r\nHX-Redirect: /login?email=%s\r\n\r\n", my_encoded_email);
     } else {
-        template = get_value("signup-form", sizeof("signup-form"), p_global_arena_data->html.component_dict);
+        sprintf((char *)response_headers, "HTTP/1.1 200 OK\r\nHX-Redirect: /signup?email=%s\r\n\r\n", my_encoded_email);
     }
 
     int client_socket = scratch_arena_data->client_socket;
 
-    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-
-    size_t response_length = strlen(response_headers) + strlen(template);
-
-    char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
-
-    sprintf(response, "%s%s", response_headers, template);
-    response[response_length] = '\0';
-
-    if (send(client_socket, response, strlen(response), 0) == -1) {
-        /** TODO: Write error to logs */
+    if (send(client_socket, response_headers, strlen((char *)response_headers), 0) == -1) {
     }
 
     close(scratch_arena_data->client_socket);
@@ -1206,6 +1322,43 @@ BlockLocation find_block(char *template, char *block_name) {
     }
 
     return block;
+}
+
+size_t replace_val(char *template, char *val_name, char *value) {
+    char *ptr = template;
+
+    char key[100];
+
+    size_t key_length = strlen(val_name) + strlen("%%");
+    assert(key_length < 100);
+
+    sprintf(key, "%c%s%c", '%', val_name, '%');
+    key[key_length] = '\0';
+
+    while (*ptr != '\0') {
+        if (strncmp(ptr, key, key_length) == 0) {
+            size_t val_length = strlen(value);
+
+            char *after = ptr + strlen(key);
+
+            memmove(ptr + val_length, after, strlen(after) + 1);
+            memcpy(ptr, value, val_length);
+
+            ptr += strlen(ptr) + 1;
+
+            /** Clean up memory */
+            while (*ptr != '\0') {
+                *ptr = '\0';
+                ptr++;
+            }
+
+            return strlen(template);
+        }
+
+        ptr++;
+    }
+
+    return strlen(template);
 }
 
 size_t render_val(char *template, char *val_name, char *value) {
@@ -1565,6 +1718,57 @@ void not_found(int client_socket) {
     }
 
     close(client_socket);
+}
+
+/* Converts a nibble (4 bits) to its hexadecimal representation */
+char char_to_hex(unsigned char nibble) {
+    if (nibble < 10) {
+        return '0' + nibble;
+    }
+    if (nibble < 16) {
+        return 'A' + (nibble - 10);
+    }
+    return -1; /* Error case, should never happen for valid input */
+}
+
+/* URL encode function */
+size_t url_encode_utf8(char **string, size_t length) {
+    char *in = *string;
+    static char buffer[1024];
+    char *out = buffer;
+
+    size_t new_len = 0;
+
+    size_t i;
+    for (i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)in[i];
+
+        /* Encode non-alphanumeric characters and special symbols */
+        if (!isalnum(c) && c != '-' && c != '_' && c != '.' && c != '~') {
+            *out++ = '%';
+            *out++ = char_to_hex((c >> 4) & 0xF);
+            *out++ = char_to_hex(c & 0xF);
+            new_len += 3;
+        } else if (c == ' ') {
+            *out++ = '+';
+            new_len++;
+        } else {
+            *out++ = c;
+            new_len++;
+        }
+    }
+
+    *out = '\0'; /* Null-terminate the encoded string */
+
+    /* Copy the encoded string back to the input buffer if it fits */
+    if (new_len < sizeof(buffer)) {
+        strncpy(*string, buffer, new_len + 1);
+    } else {
+        /* Handle the case where the buffer is insufficient */
+        return 0; /* Signal an error or handle it in another way */
+    }
+
+    return new_len;
 }
 
 /**
