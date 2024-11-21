@@ -62,9 +62,6 @@
 #define VAL_OPENING_TAG__START "<x-val name=\""
 #define VAL_SELF_CLOSING_TAG__END "\" />"
 
-#define OPENING "{{"
-#define CLOSING "}}"
-
 #define URL(path) path "\x20"
 #define URL_WITH_QUERY(path) path "?"
 
@@ -73,10 +70,6 @@
 |                                     structs                                       |
 +-----------------------------------------------------------------------------------+
 */
-
-typedef enum { FOR_START, FOR_END } TokenType;
-
-typedef enum { POINT_BEFORE, POINT_AFTER } CharPointer;
 
 typedef enum { SERVER_SOCKET, CLIENT_SOCKET, DB_SOCKET } FDType;
 
@@ -105,6 +98,9 @@ typedef struct {
     char *start_addr;
     char *end_addr;
 } CharsBlock;
+
+typedef CharsBlock Dict;
+typedef CharsBlock Location;
 
 typedef struct {
     char *before;
@@ -188,9 +184,9 @@ CharsBlock load_html_components(const char *base_path);
 CharsBlock resolve_html_components_imports();
 void resolve_slots(char *component_markdown, char *import_statement, char **templates);
 BlockLocation find_block(char *template, char *block_name);
-size_t render_val(char *template, char *val_name, char *value);
+size_t render_val(char *template, char *value_name, char *value);
 size_t render_for(char *template, char *scope, int times, ...);
-size_t replace_val(char *template, char *val_name, char *value);
+size_t replace_val(char *template, char *value_name, char *value);
 size_t html_minify(char *buffer, char *html, size_t html_length);
 
 /** Connection */
@@ -198,34 +194,35 @@ char *load_db_connection_string(const char *filepath);
 void create_connection_pool(const char *conn_info);
 DBConnection *get_connection(Arena *scratch_arena_raw);
 QueuedRequest *put_in_queue(Arena *scratch_arena_raw);
+PGresult *get_result(DBConnection *connection);
 void print_query_result(PGresult *query_result);
 
 /** Request handlers */
 void router(Arena *scratch_arena_raw);
-void home_get(Arena *scratch_arena_raw);
-void not_found(int client_socket);
 void public_get(Arena *scratch_arena_raw, String url);
-void view_get(Arena *scratch_arena_raw, char *view, CharsBlock replaces);
+void view_get(Arena *scratch_arena_raw, char *view, Dict replaces);
+void home_get(Arena *scratch_arena_raw);
 void auth_validate_email_post(Arena *scratch_arena_raw);
 void register_create_account_post(Arena *scratch_arena_raw);
+void not_found(int client_socket);
+void release_resources_and_exit(Arena *scratch_arena_raw, DBConnection *connection);
 
 /** Request utils */
 String find_http_request_value(const char key[], char *request);
-uint16_t string_to_uint16(const char *str);
-char *find_body(CharsBlock request);
-CharsBlock parse_body_value(const char key_name[], char *request_body);
+String find_body(CharsBlock request);
+String find_body_value(const char key[], String body);
 char *file_content_type(Arena *scratch_arena_raw, const char *path);
-size_t url_decode_utf8(char **string, size_t length);
-CharsBlock parse_and_decode_query_params(Arena *scratch_arena_raw, String raw_query_params);
-char char_to_hex(unsigned char nibble);
+char char_to_hex(unsigned char nibble); /** TODO: Review this function */
+char hex_to_char(unsigned char c);      /** TODO: Review this function */
 size_t url_encode_utf8(char **string, size_t length);
+size_t url_decode_utf8(char **string, size_t length);
+Dict parse_and_decode_params(Arena *scratch_arena_raw, String raw_query_params);
 
 /** Utils */
 CharsBlock load_env_variables(const char *filepath);
 void read_file(char **buffer, long *file_size, char *absolute_file_path);
 char *locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
-char *get_value(const char key[], size_t key_length, CharsBlock block);
-char hex_to_char(char c);
+char *find_value(const char key[], size_t key_length, CharsBlock block);
 
 /*
 +-----------------------------------------------------------------------------------+
@@ -250,8 +247,6 @@ QueuedRequest queue[MAX_CONNECTIONS];
 jmp_buf ctx;
 jmp_buf db_ctx;
 
-int h_count;
-
 /*
 +-----------------------------------------------------------------------------------+
 |                                       code                                        |
@@ -271,10 +266,10 @@ int main() {
 
     CharsBlock envs = load_env_variables("./.env");
 
-    const char *public_base_path = get_value("PUBLIC_FOLDER", sizeof("PUBLIC_FOLDER"), envs);
+    const char *public_base_path = find_value("PUBLIC_FOLDER", sizeof("PUBLIC_FOLDER"), envs);
     CharsBlock public_files = load_public_files(public_base_path);
 
-    const char *html_base_path = get_value("TEMPLATES_FOLDER", sizeof("TEMPLATES_FOLDER"), envs);
+    const char *html_base_path = find_value("TEMPLATES_FOLDER", sizeof("TEMPLATES_FOLDER"), envs);
     CharsBlock html_raw_components = load_html_components(html_base_path);
 
     CharsBlock html_components = resolve_html_components_imports(); /** TODO: Review the code inside this function */
@@ -314,13 +309,14 @@ int main() {
                         int client_fd_flags = fcntl(client_fd, F_GETFL, 0);
                         assert(fcntl(client_fd, F_SETFL, client_fd_flags | O_NONBLOCK) != -1);
 
+                        /** TODO: Create better logs to trace a request lifetime */
                         printf("Initiated - client-fd: %d\n", client_fd);
 
                         /** Allocate memory for handling client request */
                         Arena *scratch_arena_raw = arena_init(PAGE_SIZE * 10);
                         Socket *client_socket_info = (Socket *)arena_alloc(scratch_arena_raw, sizeof(Socket));
-                        client_socket_info->fd = client_fd;
                         client_socket_info->type = CLIENT_SOCKET;
+                        client_socket_info->fd = client_fd;
 
                         ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)arena_alloc(scratch_arena_raw, sizeof(ScratchArenaDataLookup));
                         scratch_arena_data->arena = scratch_arena_raw;
@@ -339,7 +335,7 @@ int main() {
                     break;
                 }
 
-                case CLIENT_SOCKET: {
+                case CLIENT_SOCKET: { /** Client socket (aka. client request) ready for read */
                     if (events[i].events & EPOLLIN) {
                         Arena *scratch_arena_raw = (Arena *)((uint8_t *)socket_info - sizeof(Arena));
 
@@ -357,16 +353,14 @@ int main() {
                 }
 
                 case DB_SOCKET: {
-                    if (events[i].events & EPOLLIN) { /** DB socket (aka connection) ready for read */
+                    if (events[i].events & EPOLLIN) { /** DB socket (aka. connection) ready for read */
                         DBConnection *connection = (DBConnection *)socket_info;
 
-                        /** The connection should belong to a client fd (aka request) */
+                        /** The connection should belong to a client fd (aka. client request) */
                         assert(connection->client.fd != 0);
 
-                        /** Go back to where you attempted to read the result of a
-                         * query but jumped out since we are not supposed to wait
-                         * for response to be ready. Pass index to restore request
-                         * state through connection pool */
+                        /** Postgres query response is ready for read, jump back to code and
+                         * pass index to restore request state through connection pool */
                         longjmp(connection->client.jmp_buf, to_index(connection->index));
                     } else if (events[i].events & EPOLLOUT) { /** DB socket (aka connection) is ready for write */
                         DBConnection *connection = (DBConnection *)socket_info;
@@ -376,7 +370,7 @@ int main() {
                         int j;
                         for (j = 0; j < MAX_CONNECTIONS; j++) {
                             if (queue[j].client.fd != 0) {
-                                /** First in the queue waiting for connection */
+                                /** First client request in the queue waiting for connection */
                                 request = &(queue[j]);
 
                                 break;
@@ -389,19 +383,18 @@ int main() {
                             memset(&(request->client), 0, sizeof(Client));
 
                             if (setjmp(db_ctx) == 0) {
-                                longjmp(connection->client.jmp_buf /* This will jump to queue find loop */, to_index(connection->index));
+                                /* Request handler queued the request because no connection was
+                                 * available in the pool, here we jump back to code after queuing request */
+                                longjmp(connection->client.jmp_buf, to_index(connection->index));
                             }
                         }
-
-                        /** We don't do anything here since the connection pool
-                         * already only allow us to use free connections (aka db sockets ready for write) */
                     }
 
                     break;
                 }
 
                 default: {
-                    /* TODO */
+                    /* TODO: ??? */
                     break;
                 }
             }
@@ -418,40 +411,10 @@ int main() {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-uint16_t string_to_uint16(const char *str) {
-    char *endptr;
-    errno = 0;
-    unsigned long ul = strtoul(str, &endptr, 10);
-
-    if (errno != 0) {
-        perror("strtoul");
-        return 0;
-    }
-
-    if (*endptr != '\0') {
-        fprintf(stderr, "Trailing characters after number: %s\n", endptr);
-        return 0;
-    }
-
-    if (ul > UINT16_MAX) {
-        fprintf(stderr, "Value out of range for uint16_t\n");
-        return 0;
-    }
-
-    return (uint16_t)ul;
-}
-
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 void router(Arena *scratch_arena_raw) {
-    int i;
-
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     int client_socket = scratch_arena_data->client_socket;
-
-    printf("Handling - client-fd: %d\n", client_socket);
 
     char *request = (char *)scratch_arena_raw->current;
     scratch_arena_data->request.start_addr = scratch_arena_raw->current;
@@ -472,10 +435,6 @@ void router(Arena *scratch_arena_raw) {
 
         ssize_t incomming_stream_size = recv(client_socket, advanced_request_ptr, buffer_size - read_stream, 0);
         if (incomming_stream_size == -1) {
-            /*
-            printf("Error: %s\n", strerror(errno));
-            */
-
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 if (read_stream > 0) {
                     break;
@@ -486,15 +445,16 @@ void router(Arena *scratch_arena_raw) {
         }
 
         if (incomming_stream_size <= 0) {
-            /** FIX IMPORTANT: Make client_socket non-blocking, otherwise it will block when client request contains 0 bytes */
             printf("fd %d - Empty request\n", client_socket);
             return;
         }
 
-        /** decode */
-        /*
-        incomming_stream_size = (ssize_t)url_decode_utf8(&advanced_request_ptr, (size_t)incomming_stream_size);
-        */
+        /**
+         * NOTE: While it is possible to decode the entire HTTP request here at once,
+         * we avoid doing so to prevent potential issues with requests containing
+         * non-textual data, such as images or binary files. Processing such data
+         * inappropriately could lead to corruption or unexpected behavior.
+         */
 
         read_stream += incomming_stream_size;
 
@@ -572,13 +532,6 @@ void router(Arena *scratch_arena_raw) {
     scratch_arena_raw->current = tmp_request;
     scratch_arena_data->request.end_addr = (char *)scratch_arena_raw->current - 1;
 
-    if (strlen(scratch_arena_data->request.start_addr) == 0) {
-        printf("Request is empty\n");
-
-        close(client_socket);
-        return;
-    }
-
     String url = find_http_request_value("URL", scratch_arena_data->request.start_addr);
 
     if (strncmp(url.start_addr, "/public", strlen("/public")) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
@@ -596,13 +549,13 @@ void router(Arena *scratch_arena_raw) {
     if (strncmp(url.start_addr, URL("/login"), strlen(URL("/login"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/login"), strlen(URL_WITH_QUERY("/login"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
             String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request.start_addr);
-            CharsBlock replaces = {0};
+            Dict replacements = {0};
 
             if (query_params.length > 0) {
-                replaces = parse_and_decode_query_params(scratch_arena_raw, query_params);
+                replacements = parse_and_decode_params(scratch_arena_raw, query_params);
             }
 
-            view_get(scratch_arena_raw, "login", replaces);
+            view_get(scratch_arena_raw, "login", replacements);
             return;
         }
     }
@@ -610,13 +563,13 @@ void router(Arena *scratch_arena_raw) {
     if (strncmp(url.start_addr, URL("/register"), strlen(URL("/register"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/register"), strlen(URL_WITH_QUERY("/register"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
             String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request.start_addr);
-            CharsBlock replaces = {0};
+            Dict replacements = {0};
 
             if (query_params.length > 0) {
-                replaces = parse_and_decode_query_params(scratch_arena_raw, query_params);
+                replacements = parse_and_decode_params(scratch_arena_raw, query_params);
             }
 
-            view_get(scratch_arena_raw, "register", replaces);
+            view_get(scratch_arena_raw, "register", replacements);
             return;
         }
     }
@@ -633,16 +586,12 @@ void router(Arena *scratch_arena_raw) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
             String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request.start_addr);
 
-            CharsBlock replaces;
+            Dict replacements;
             if (query_params.length > 0) {
-                replaces = parse_and_decode_query_params(scratch_arena_raw, query_params);
-            } else {
-                char key_value_01[] = "transition_direction\0transition-left";
-                replaces.start_addr = key_value_01;
-                replaces.end_addr = &(key_value_01[sizeof(key_value_01)]);
+                replacements = parse_and_decode_params(scratch_arena_raw, query_params);
             }
 
-            view_get(scratch_arena_raw, "auth", replaces);
+            view_get(scratch_arena_raw, "auth", replacements);
             return;
         }
     }
@@ -658,22 +607,43 @@ void router(Arena *scratch_arena_raw) {
     return;
 }
 
-CharsBlock parse_and_decode_query_params(Arena *scratch_arena_raw, String raw_query_params) {
-    CharsBlock key_value = {0};
+/**
+ * @brief Parses and decodes URL query or request body parameters into a dictionary
+ * stored in a scratch arena.
+ *
+ * This function processes a raw parameter string, extracts key-value pairs,
+ * decodes UTF-8 encoded values, and stores the results in memory allocated from a
+ * scratch arena. The parsed data is returned as a `Dict` object, which contains
+ * the start and end addresses of the key-value data.
+ *
+ * @param scratch_arena_raw Pointer to an `Arena` structure for memory allocation.
+ *        The parsed key-value data is stored here.
+ * @param raw_params `String` containing request body parameters or raw query parameters
+ *        beginning with '?'(e.g., `?key1=value1&key2=value2`).
+ *
+ * @return `Dict` containing the parsed data. May return an empty `Dict`.
+ *
+ * @note UTF-8 decoding of values is performed in place during parsing.
+ */
+Dict parse_and_decode_params(Arena *scratch_arena_raw, String raw_params) {
+    Dict key_value = {0};
 
-    if (raw_query_params.length == 0) {
+    if (raw_params.length == 0) {
         return key_value;
     }
 
-    char *ptr = raw_query_params.start_addr;
-    char *raw_query_end = raw_query_params.start_addr + raw_query_params.length;
+    char *ptr = raw_params.start_addr;
+    char *raw_params_end = raw_params.start_addr + raw_params.length;
 
-    char *start = (char *)scratch_arena_raw->current;
-    key_value.start_addr = start;
+    char *params_dict = (char *)scratch_arena_raw->current;
+    key_value.start_addr = params_dict;
 
-    ptr++; /** skip '?' */
+    if (*ptr == '?') {
+        /** skip '?' at the beginning of query params string */
+        ptr++;
+    }
 
-    while (ptr < raw_query_end) {
+    while (ptr < raw_params_end) {
         char *key = ptr;
         char *key_end = key;
         while (*key_end != '=') {
@@ -681,30 +651,32 @@ CharsBlock parse_and_decode_query_params(Arena *scratch_arena_raw, String raw_qu
         }
 
         size_t key_length = key_end - key;
-        memcpy(start, key, key_length);
-        start += key_length;
-        *start = '\0';
-        start++;
+        memcpy(params_dict, key, key_length);
+        params_dict += key_length;
+        *params_dict = '\0';
+        params_dict++;
 
-        char *val = key_end + 1;
+        /** NOTE: Is it possible that query param does not have a value? */
+
+        char *val = key_end + 1; /** +1 to skip '=' */
         char *val_end = val;
-        while (*val_end != '&' && !isspace(*val_end)) {
+        while (*val_end != '&' && !isspace(*val_end) && *val_end != '\0') {
             val_end++;
         }
 
         size_t val_length = val_end - val;
-        memcpy(start, val, val_length);
-        size_t new_val_length = url_decode_utf8(&start, val_length);
-        start += new_val_length;
-        *start = '\0';
-        start++;
+        memcpy(params_dict, val, val_length);
+        size_t new_val_length = url_decode_utf8(&params_dict, val_length);
+        params_dict += new_val_length;
+        *params_dict = '\0';
+        params_dict++;
 
-        ptr = val_end + 1;
+        ptr = val_end + 1; /** +1 to skip possible '&' which marks the end of query (or body) param key-value and beginning of new one */
     }
 
-    key_value.end_addr = start - 1;
+    key_value.end_addr = params_dict - 1; /** -1 because we (params_dict++) at the end of query (or body) param value processing */
 
-    scratch_arena_raw->current = start;
+    scratch_arena_raw->current = params_dict;
 
     return key_value;
 }
@@ -820,99 +792,130 @@ void resolve_slots(char *component_markdown, char *import_statement, char **temp
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * @brief Finds the start of the body in an HTTP request.
+ *
+ * Scans the `request` for the `\r\n\r\n` sequence that separates headers from the body
+ * and returns a pointer to the body start.
+ *
+ * @param request A `CharsBlock` representing the HTTP request with start and end pointers.
+ *
+ * @return Pointer to the start of the body or NULL if no body is found.
  */
-char *find_body(CharsBlock request) {
-    char *body = request.start_addr;
+String find_body(CharsBlock request) {
+    String body = {0};
+    char *ptr = request.start_addr;
 
-    while (body < request.end_addr) {
-        char header_headers_end[] = "\r\n\r\n";
-        if (strncmp(body, header_headers_end, strlen(header_headers_end)) == 0) {
-            body += strlen(header_headers_end);
+    char request_headers_end[] = "\r\n\r\n";
 
-            break;
+    while (ptr < request.end_addr) {
+        if (strncmp(ptr, request_headers_end, strlen(request_headers_end)) == 0) {
+            ptr += strlen(request_headers_end);
+
+            body.start_addr = ptr;
+            body.length = strlen(ptr);
+
+            return body;
         }
 
-        body++;
+        ptr++;
     }
 
     return body;
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * @brief Finds the value associated with a given key in a request body.
+ *
+ * Searches the `body` for the specified `key` and returns its corresponding value as a `String`.
+ *
+ * @param key The key to search for (null-terminated string).
+ * @param body A `String` representing the request body (e.g., `key1=value1&key2=value2`).
+ *
+ * @return `String` containing the value associated with the key.
+ *         If the key is not found, returns an empty `String`.
  */
-CharsBlock parse_body_value(const char key_name[], char *request_body) {
-    CharsBlock value = {0};
-    value.start_addr = request_body;
+String find_body_value(const char key[], String body) {
+    /** TODO: Check whether key can have no value */
+    String value = {0};
 
-    char *p = request_body;
-    char *end = request_body + strlen(request_body) + 1;
+    char *ptr = body.start_addr;
+    char *body_end = body.start_addr + body.length + 1;
 
-    while (value.start_addr < end) {
-        if (strncmp(value.start_addr, key_name, strlen(key_name)) == 0) {
-            char *passed_key = value.start_addr + strlen(key_name);
+    while (ptr < body_end) {
+        if (strncmp(ptr, key, strlen(key)) == 0) {
+            char *key_end = ptr + strlen(key);
 
-            if (passed_key[0] == '=') {
-                passed_key++;
-                value.start_addr = passed_key;
+            if (*key_end == '=') {
+                key_end++;
+                value.start_addr = key_end;
                 break;
             }
         }
 
-        value.start_addr++;
+        ptr++;
     }
 
-    value.end_addr = value.start_addr;
+    char *value_end = value.start_addr;
+    while (value_end < body_end) {
+        if (*value_end == '&' || *value_end == '\0') {
+            value.length = value_end - value.start_addr;
 
-    while (value.end_addr < end) {
-        if (value.end_addr[0] == '&' || value.end_addr[0] == '\0') {
             break;
         }
 
-        value.end_addr++;
+        value_end++;
     }
 
     return value;
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * @brief Handles requests for pages that do not require authentication.
+ *
+ * This function serves as a generic handler for unauthenticated pages such as login or
+ * registration. The `replaces` parameter is a dictionary containing values from the URL
+ * query parameters passed in the request. For example, a request to `/example?foo=bar`
+ * would render the example page template, substituting `bar` into the corresponding
+ * placeholders within the template.
  */
-void view_get(Arena *scratch_arena_raw, char *view, CharsBlock replaces) {
+void view_get(Arena *scratch_arena_raw, char *view, Dict replaces) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     int client_socket = scratch_arena_data->client_socket;
 
-    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-    char *template = get_value(view, strlen(view), p_global_arena_data->html.component_dict);
+    char *template = find_value(view, strlen(view), p_global_arena_data->html.component_dict);
 
-    char *template_cpy = (char *)scratch_arena_raw->current;
-    memcpy(template_cpy, template, strlen(template) + 1);
+    if (replaces.start_addr) {
+        char *template_cpy = (char *)scratch_arena_raw->current;
+        memcpy(template_cpy, template, strlen(template) + 1);
 
-    char *ptr = replaces.start_addr;
-    while (ptr < replaces.end_addr) {
-        char *key = ptr;
-        char *value = ptr + strlen(ptr) + 1;
+        char *ptr = replaces.start_addr;
+        while (ptr < replaces.end_addr) {
+            char *key = ptr;
+            char *value = ptr + strlen(ptr) + 1;
 
-        replace_val(template_cpy, key, value);
+            replace_val(template_cpy, key, value);
 
-        ptr += strlen(ptr) + 1; /* pass key */
-        ptr += strlen(ptr) + 1; /* pass value */
+            ptr += strlen(ptr) + 1; /* pass key */
+            ptr += strlen(ptr) + 1; /* pass value */
+        }
+
+        scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
+
+        /** Re-set template to point to "rendered template copy" */
+        template = template_cpy;
     }
 
-    scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
-
-    size_t response_length = strlen(response_headers) + strlen(template_cpy);
+    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+    size_t response_length = strlen(response_headers) + strlen(template);
 
     char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
 
-    sprintf(response, "%s%s", response_headers, template_cpy);
+    sprintf(response, "%s%s", response_headers, template);
     response[response_length] = '\0';
 
     if (send(client_socket, response, strlen(response), 0) == -1) {
-        /** TODO: Write error to logs */
     }
 
     close(client_socket);
@@ -921,7 +924,18 @@ void view_get(Arena *scratch_arena_raw, char *view, CharsBlock replaces) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * @brief Retrieves an available database connection from the connection pool.
+ *
+ * Searches the connection pool for an unused connection and assigns the current request,
+ * represented by `scratch_arena_raw`, to the found connection.
+ *
+ * @param scratch_arena_raw Pointer to an `Arena` representing the current request.
+ *        Used to associate the request with the connection.
+ *
+ * @return `DBConnection *` pointing to the available connection. Returns `NULL` if the pool is full.
+ *
+ * @note A connection is considered available if its `client.fd` is 0. The connection's
+ *       `client` is updated with the request context and socket data.
  */
 DBConnection *get_connection(Arena *scratch_arena_raw) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -946,7 +960,18 @@ DBConnection *get_connection(Arena *scratch_arena_raw) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * @brief Adds a request to the queue by associating it with an available queue slot.
+ *
+ * Searches the request queue for an empty slot and assigns the current request,
+ * represented by `scratch_arena_raw`, to the slot. Marks the request as queued.
+ *
+ * @param scratch_arena_raw Pointer to an `Arena` representing the current request.
+ *        Used to associate the request with the queue slot.
+ *
+ * @return `QueuedRequest *` pointing to the queue slot assigned to the request.
+ *
+ * @note A queue slot is considered available if its `client.fd` is 0. The slot's `client`
+ *       is updated with the request context and marked as queued.
  */
 QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
     int i;
@@ -972,6 +997,9 @@ QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
     assert(0);
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void register_create_account_post(Arena *scratch_arena_raw) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
@@ -996,20 +1024,11 @@ void register_create_account_post(Arena *scratch_arena_raw) {
 
     assert(connection != NULL);
 
-    char *body = find_body(scratch_arena_data->request);
+    String body = find_body(scratch_arena_data->request);
+    Dict params = parse_and_decode_params(scratch_arena_raw, body);
 
-    CharsBlock encoded_email = parse_body_value("email", body);
-    size_t encoded_email_length = encoded_email.end_addr - encoded_email.start_addr;
-
-    char *email = (char *)arena_alloc(scratch_arena_raw, encoded_email_length);
-    memcpy(email, encoded_email.start_addr, encoded_email_length);
-    url_decode_utf8(&email, encoded_email_length);
-
-    CharsBlock password = parse_body_value("password", body);
-    size_t password_length = password.end_addr - password.start_addr;
-
-    char *user_password = (char *)arena_alloc(scratch_arena_raw, password_length);
-    memcpy(user_password, password.start_addr, password_length);
+    char *email = find_value("email", strlen("email"), params);
+    char *user_password = find_value("password", strlen("password"), params);
 
     const char *command = "INSERT INTO app.users (email, password) VALUES ($1, $2)";
     Oid paramTypes[2] = {25, 25};
@@ -1055,31 +1074,11 @@ void register_create_account_post(Arena *scratch_arena_raw) {
 
     connection = &(connection_pool[index]);
 
-    while (PQisBusy(connection->conn)) {
-        int _conn_fd = PQsocket(connection->conn);
+    PGresult *result = get_result(connection);
 
-        printf("busy socket: %d\n", _conn_fd);
-
-        if (!PQconsumeInput(connection->conn)) {
-            fprintf(stderr, "PQconsumeInput failed: %s\n", PQerrorMessage(connection->conn));
-        }
-    }
-
-    int rows;
-
-    PGresult *res;
-    while ((res = PQgetResult(connection->conn)) != NULL) {
-        if (PQresultStatus(res) != PGRES_TUPLES_OK && PQresultStatus(res) != PGRES_COMMAND_OK) {
-            fprintf(stderr, "Query failed: %s\n", PQerrorMessage(connection->conn));
-            PQclear(res);
-            break;
-        }
-
-        print_query_result(res);
-
-        rows = PQntuples(res);
-        PQclear(res);
-    }
+    int rows = PQntuples(result);
+    print_query_result(result);
+    PQclear(result);
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nHX-Redirect: /\r\n\r\n";
 
@@ -1088,26 +1087,55 @@ void register_create_account_post(Arena *scratch_arena_raw) {
     if (send(client_socket, response_headers, strlen((char *)response_headers), 0) == -1) {
     }
 
-    close(scratch_arena_data->client_socket);
+    close(client_socket);
 
-    uint8_t was_queued = connection->client.queued;
+    release_resources_and_exit(scratch_arena_raw, connection);
+}
 
-    /* release connection for others to use */
-    memset(&(connection->client), 0, sizeof(Client));
-
-    int conn_fd = PQsocket(connection->conn);
-
-    event.events = EPOLLOUT | EPOLLET;
-    event.data.ptr = connection;
-    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_fd, &event);
-
-    arena_free(scratch_arena_raw);
-
-    if (was_queued) {
-        longjmp(db_ctx, 1); /** Jump back */
-    } else {
-        longjmp(ctx, 1); /** Jump back */
+/**
+ * @brief Retrieves the result of an asynchronous PostgreSQL query.
+ *
+ * Encapsulates boilerplate logic for processing query results in an asynchronous
+ * PostgreSQL connection. Ensures all input is consumed, waits for the query to finish,
+ * and retrieves the first valid result from the connection.
+ *
+ * @param connection Pointer to a `DBConnection` representing the PostgreSQL connection.
+ *
+ * @return Pointer to a `PGresult` structure containing the query result. If the query fails,
+ *         logs the error and cleans up any invalid results. Returns the first valid result
+ *         if multiple are available.
+ *
+ * @warning The returned `PGresult` must be cleared with `PQclear` after use to avoid memory leaks.
+ */
+PGresult *get_result(DBConnection *connection) {
+    if (!PQconsumeInput(connection->conn)) {
+        assert(0);
     }
+
+    while (PQisBusy(connection->conn)) {
+        if (!PQconsumeInput(connection->conn)) {
+            assert(0);
+        }
+    }
+
+    PGresult *result;
+
+    PGresult *ptr;
+    int did_set_ptr = 0;
+    while ((ptr = PQgetResult(connection->conn)) != NULL) {
+        if (did_set_ptr == 0) {
+            result = ptr;
+            did_set_ptr = 1;
+        }
+
+        if (PQresultStatus(ptr) != PGRES_TUPLES_OK && PQresultStatus(ptr) != PGRES_COMMAND_OK) {
+            fprintf(stderr, "Query failed: %s\n", PQerrorMessage(connection->conn));
+            PQclear(ptr);
+            break;
+        }
+    }
+
+    return result;
 }
 
 /**
@@ -1137,14 +1165,10 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
 
     assert(connection != NULL);
 
-    char *body = find_body(scratch_arena_data->request);
+    String body = find_body(scratch_arena_data->request);
+    Dict params = parse_and_decode_params(scratch_arena_raw, body);
 
-    CharsBlock encoded_email = parse_body_value("email", body);
-    size_t encoded_email_length = encoded_email.end_addr - encoded_email.start_addr;
-
-    char *email = (char *)arena_alloc(scratch_arena_raw, encoded_email_length);
-    memcpy(email, encoded_email.start_addr, encoded_email_length);
-    url_decode_utf8(&email, encoded_email_length);
+    char *email = find_value("email", strlen("email"), params);
 
     const char *command = "SELECT email FROM app.users WHERE email = $1";
     Oid paramTypes[1] = {25};
@@ -1156,18 +1180,15 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
 
     if (PQsendQueryParams(connection->conn, command, 1, paramTypes, paramValues, paramLengths, paramFormats, resultFormat) == 0) {
         fprintf(stderr, "Query failed to send: %s\n", PQerrorMessage(connection->conn));
-        int _conn_fd = PQsocket(connection->conn);
-        printf("socket: %d", _conn_fd);
     }
 
-    int _conn_fd = PQsocket(connection->conn);
+    int conn_socket = PQsocket(connection->conn);
 
     event.events = EPOLLIN | EPOLLET;
     event.data.ptr = connection;
-    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, _conn_fd, &event);
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_socket, &event);
 
     int index;
-
     if (connection->client.queued) {
         int r = setjmp(connection->client.jmp_buf);
         if (r == 0) {
@@ -1189,46 +1210,20 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
 
     connection = &(connection_pool[index]);
 
-    while (PQisBusy(connection->conn)) {
-        int _conn_fd = PQsocket(connection->conn);
+    PGresult *result = get_result(connection);
 
-        printf("busy socket: %d\n", _conn_fd);
-
-        if (!PQconsumeInput(connection->conn)) {
-            fprintf(stderr, "PQconsumeInput failed: %s\n", PQerrorMessage(connection->conn));
-        }
-    }
-
-    int rows;
-
-    PGresult *res;
-    while ((res = PQgetResult(connection->conn)) != NULL) {
-        if (PQresultStatus(res) != PGRES_TUPLES_OK && PQresultStatus(res) != PGRES_COMMAND_OK) {
-            fprintf(stderr, "Query failed: %s\n", PQerrorMessage(connection->conn));
-            PQclear(res);
-            break;
-        }
-
-        print_query_result(res);
-
-        rows = PQntuples(res);
-        PQclear(res);
-    }
+    int rows = PQntuples(result);
+    print_query_result(result);
+    PQclear(result);
 
     char *response_headers[200];
 
-    char _encoded_email[100];
-    char *my_encoded_email = _encoded_email;
-
-    memset(my_encoded_email, 0, 100);
-    memcpy(my_encoded_email, email, strlen(email));
-
-    size_t new_len = url_encode_utf8(&my_encoded_email, strlen(my_encoded_email));
+    String encoded_email = find_body_value("email", body);
 
     if (rows > 0) {
-        sprintf((char *)response_headers, "HTTP/1.1 200 OK\r\nHX-Redirect: /login?email=%s\r\n\r\n", my_encoded_email);
+        sprintf((char *)response_headers, "HTTP/1.1 200 OK\r\nHX-Redirect: /login?email=%.*s\r\n\r\n", (int)encoded_email.length, encoded_email.start_addr);
     } else {
-        sprintf((char *)response_headers, "HTTP/1.1 200 OK\r\nHX-Redirect: /register?email=%s\r\n\r\n", my_encoded_email);
+        sprintf((char *)response_headers, "HTTP/1.1 200 OK\r\nHX-Redirect: /register?email=%.*s\r\n\r\n", (int)encoded_email.length, encoded_email.start_addr);
     }
 
     int client_socket = scratch_arena_data->client_socket;
@@ -1243,11 +1238,11 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
     /* release connection for others to use */
     memset(&(connection->client), 0, sizeof(Client));
 
-    int conn_fd = PQsocket(connection->conn);
+    conn_socket = PQsocket(connection->conn);
 
     event.events = EPOLLOUT | EPOLLET;
     event.data.ptr = connection;
-    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_fd, &event);
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_socket, &event);
 
     arena_free(scratch_arena_raw);
 
@@ -1259,7 +1254,16 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * @brief Determines the content type for a given file path based on its extension.
+ *
+ * This function checks the file path's extension and returns the corresponding content type.
+ * For a list of supported extensions, refer to the function implementation.
+ *
+ * @param scratch_arena_raw Pointer to an `Arena` used for memory allocation.
+ * @param path The file path (null-terminated string) for which to determine the content type.
+ *
+ * @return A pointer to a string containing the appropriate content type. The returned string
+ * is allocated from the arena.
  */
 char *file_content_type(Arena *scratch_arena_raw, const char *path) {
     char *path_end = path + strlen(path);
@@ -1293,7 +1297,18 @@ char *file_content_type(Arena *scratch_arena_raw, const char *path) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * @brief Serves requested static text file from the public directory or its subfolders.
+ *
+ * This function retrieves and serves text files from a folder specified by the `PUBLIC_FOLDER`
+ * environment variable. It constructs the file path from the provided URL, determines the content
+ * type, and sends the file's contents as an HTTP response to the client.
+ *
+ * @param scratch_arena_raw Pointer to an `Arena` representing the current request and client context.
+ * @param url A `String` representing the requested URL path. The file is retrieved relative to the
+ *            `PUBLIC_FOLDER` directory.
+ *
+ * @warning The content of the file is sent as plain text. This function assumes the file exists in the
+ *          directory structure specified by the `PUBLIC_FOLDER` environment variable.
  */
 void public_get(Arena *scratch_arena_raw, String url) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
@@ -1301,40 +1316,35 @@ void public_get(Arena *scratch_arena_raw, String url) {
 
     int client_socket = scratch_arena_data->client_socket;
 
-    const char *base_path = get_value("PUBLIC_FOLDER", sizeof("PUBLIC_FOLDER"), p_global_arena_data->envs);
+    const char *base_path = find_value("PUBLIC_FOLDER", sizeof("PUBLIC_FOLDER"), p_global_arena_data->envs);
 
     char *path = (char *)arena_alloc(scratch_arena_raw, sizeof('.') + url.length);
     char *tmp_path = path;
-    tmp_path[0] = '.';
+    *tmp_path = '.';
     tmp_path++;
     strncpy(tmp_path, url.start_addr, url.length);
 
     char *public_file_type = file_content_type(scratch_arena_raw, path);
-    char *content = get_value(path, strlen(path), p_global_arena_data->public.file_dict);
+    char *content = find_value(path, strlen(path), p_global_arena_data->public.file_dict);
 
-    char *res = (char *)scratch_arena_raw->current;
-    scratch_arena_data->response.start_addr = res;
+    char *response = (char *)scratch_arena_raw->current;
+    scratch_arena_data->response.start_addr = response;
 
-    sprintf(res,
+    sprintf(response,
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: %s\r\n\r\n"
             "%s",
             public_file_type, content);
 
-    char *res_end = res;
-    while (1) {
-        if (*res_end == 0) {
-            break;
-        }
-
-        res_end++;
+    char *response_end = response;
+    while (*response_end != '\0') {
+        response_end++;
     }
 
-    scratch_arena_data->response.end_addr = res_end;
-    scratch_arena_raw->current = res_end + 1;
+    scratch_arena_data->response.end_addr = response_end;
+    scratch_arena_raw->current = response_end + 1;
 
-    if (send(client_socket, res, strlen(res), 0) == -1) {
-        /** TODO: Write error to logs */
+    if (send(client_socket, response, strlen(response), 0) == -1) {
     }
 
     close(client_socket);
@@ -1342,6 +1352,9 @@ void public_get(Arena *scratch_arena_raw, String url) {
     arena_free(scratch_arena_raw);
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 BlockLocation find_block(char *template, char *block_name) {
     BlockLocation block = {0};
 
@@ -1383,6 +1396,9 @@ BlockLocation find_block(char *template, char *block_name) {
     return block;
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 size_t replace_val(char *template, char *val_name, char *value) {
     char *ptr = template;
 
@@ -1420,6 +1436,9 @@ size_t replace_val(char *template, char *val_name, char *value) {
     return strlen(template);
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 size_t render_val(char *template, char *val_name, char *value) {
     char *ptr = template;
     uint8_t inside = 0;
@@ -1477,6 +1496,9 @@ size_t render_val(char *template, char *val_name, char *value) {
     assert(0);
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 size_t render_for(char *template, char *block_name, int times, ...) {
     va_list args;
     CharsBlock key_value = {0};
@@ -1540,7 +1562,7 @@ size_t render_for(char *template, char *block_name, int times, ...) {
                     val_tag.before = ptr;
                     val_tag.after = ptr + strlen(VAL_OPENING_TAG__START) + val_name_length + strlen(VAL_SELF_CLOSING_TAG__END) + 1;
 
-                    char *value = get_value(val_name, val_name_length, key_value);
+                    char *value = find_value(val_name, val_name_length, key_value);
 
                     if (value) {
                         size_t val_length = strlen(value);
@@ -1649,34 +1671,16 @@ void home_get(Arena *scratch_arena_raw) {
     scratch_arena_raw = scratch_arena_data->arena;
 
     connection = &(connection_pool[index]);
+    PGresult *result = get_result(connection);
 
-    while (PQisBusy(connection->conn)) {
-        int _conn_fd = PQsocket(connection->conn);
-
-        printf("busy socket: %d\n", _conn_fd);
-
-        if (!PQconsumeInput(connection->conn)) {
-            fprintf(stderr, "PQconsumeInput failed: %s\n", PQerrorMessage(connection->conn));
-        }
-    }
-
-    PGresult *res;
-    while ((res = PQgetResult(connection->conn)) != NULL) {
-        if (PQresultStatus(res) != PGRES_TUPLES_OK && PQresultStatus(res) != PGRES_COMMAND_OK) {
-            fprintf(stderr, "Query failed: %s\n", PQerrorMessage(connection->conn));
-            PQclear(res);
-            break;
-        }
-
-        print_query_result(res);
-
-        PQclear(res);
-    }
+    int rows = PQntuples(result);
+    print_query_result(result);
+    PQclear(result);
 
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-    char *template = get_value("home", sizeof("home"), p_global_arena_data->html.component_dict);
+    char *template = find_value("home", sizeof("home"), p_global_arena_data->html.component_dict);
 
     char *template_cpy = (char *)scratch_arena_raw->current;
 
@@ -1742,19 +1746,16 @@ void home_get(Arena *scratch_arena_raw) {
     close(scratch_arena_data->client_socket);
     printf("Terminated - client-fd: %d\n", scratch_arena_data->client_socket);
 
-    h_count++;
-    printf("Handled requests: %d\n", h_count);
-
     uint8_t was_queued = connection->client.queued;
 
     /* release connection for others to use */
     memset(&(connection->client), 0, sizeof(Client));
 
-    int conn_fd = PQsocket(connection->conn);
+    int conn_socket = PQsocket(connection->conn);
 
     event.events = EPOLLOUT | EPOLLET;
     event.data.ptr = connection;
-    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_fd, &event);
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_socket, &event);
 
     arena_free(scratch_arena_raw);
 
@@ -1773,7 +1774,6 @@ void not_found(int client_socket) {
                       "<html><body><h1>404 Not Found</h1></body></html>";
 
     if (send(client_socket, response, strlen(response), 0) == -1) {
-        /** TODO: Write error to logs */
     }
 
     close(client_socket);
@@ -1784,12 +1784,17 @@ char char_to_hex(unsigned char nibble) {
     if (nibble < 10) {
         return '0' + nibble;
     }
+
     if (nibble < 16) {
         return 'A' + (nibble - 10);
     }
-    return -1; /* Error case, should never happen for valid input */
+
+    assert(0);
 }
 
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 /* URL encode function */
 size_t url_encode_utf8(char **string, size_t length) {
     char *in = *string;
@@ -1861,7 +1866,7 @@ size_t url_decode_utf8(char **string, size_t length) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-char hex_to_char(char c) {
+char hex_to_char(unsigned char c) {
     if (c >= '0' && c <= '9') {
         return c - '0';
     }
@@ -2072,7 +2077,7 @@ String find_http_request_value(const char key[], char *request) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-char *get_value(const char key[], size_t key_length, CharsBlock block) {
+char *find_value(const char key[], size_t key_length, CharsBlock block) {
     char *ptr = block.start_addr;
     while (ptr < block.end_addr) {
         if (strncmp(ptr, key, key_length) == 0) {
@@ -2680,7 +2685,6 @@ Socket *create_server_socket(uint16_t port) {
     return p_global_arena_data->socket;
 }
 
-/** BUG: Sometimes it does not create all the needed connections on application start up */
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
@@ -2807,175 +2811,23 @@ void print_query_result(PGresult *query_result) {
     PQprint(stdout, query_result, &options);
 }
 
-BlockId old_find_token(char *string, char *keyword, TokenType token_type) {
-    BlockId token = {0};
+void release_resources_and_exit(Arena *scratch_arena_raw, DBConnection *connection) {
+    uint8_t was_queued = connection->client.queued;
 
-    char *block = NULL;
+    /* Set connection as unused */
+    memset(&(connection->client), 0, sizeof(Client));
 
-    char *for_start = " for";
-    char *for_end = " end-for";
+    /** Set connection available for write */
+    int conn_socket = PQsocket(connection->conn);
+    event.events = EPOLLOUT | EPOLLET;
+    event.data.ptr = connection;
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_socket, &event);
 
-    char *type;
+    arena_free(scratch_arena_raw);
 
-    if (token_type == FOR_START) {
-        type = for_start;
-    } else if (token_type == FOR_END) {
-        type = for_end;
+    if (was_queued) {
+        longjmp(db_ctx, 1);
     } else {
-        assert(0);
+        longjmp(ctx, 1);
     }
-
-    char *tmp_template = string;
-    while (*tmp_template != '\0') {
-        if (strncmp(tmp_template, keyword, strlen(keyword)) == 0) {
-            char *before_block_name = tmp_template - 1;
-            char *after_block_name = tmp_template + strlen(keyword);
-
-            while (before_block_name > string) {
-                if (isspace(*before_block_name)) {
-                    before_block_name--;
-                    continue;
-                } else if (strncmp(before_block_name + 1 - strlen(type), type, strlen(type)) == 0) {
-                    printf("Previous word IS \"for\"\n");
-                    char *before_for = before_block_name + 1 - strlen(type);
-
-                    while (before_for > string) {
-                        if (isspace(*before_for)) {
-                            before_for--;
-                            continue;
-                        } else if (strncmp(before_for + 1 - strlen("{{"), "{{", strlen("{{")) == 0) {
-                            printf("Previous word IS \"{{\"\n");
-
-                            while (*after_block_name != '\0') {
-                                if (isspace(*after_block_name)) {
-                                    after_block_name++;
-                                    continue;
-                                } else if (strncmp(after_block_name, "}}", strlen("}}")) == 0) {
-                                    printf("Next after block name IS \"}}\"\n");
-
-                                    token.before = before_for + 1 - strlen("{{");
-                                    token.after = after_block_name + strlen("}}");
-
-                                    goto exit;
-                                } else {
-                                    printf("Next after block name IS NOT \"}}\"\n");
-                                    break;
-                                }
-                            }
-                        } else {
-                            printf("Previous word IS NOT \"{{\"\n");
-                            break;
-                        }
-                    }
-                } else {
-                    printf("Previous word IS NOT \"for\"\n");
-                    break;
-                }
-            }
-        }
-
-        tmp_template++;
-    }
-
-exit:
-    return token;
-}
-
-size_t old_render(char *template, char *block_name, int times, ...) {
-    va_list args;
-    CharsBlock key_value = {0};
-
-    BlockId block_start = old_find_token(template, block_name, FOR_START);
-    BlockId block_end = old_find_token(template, block_name, FOR_END);
-
-    size_t block_length = block_end.before - block_start.after;
-
-    char *block_copy = (char *)malloc((block_length + 1) * sizeof(char));
-    memcpy(block_copy, block_start.after, block_length);
-    block_copy[block_length] = '\0';
-    char *block_copy_end = block_copy + block_length;
-
-    char *start = block_start.before;
-    char *after = block_end.after;
-
-    size_t after_copy_lenght = strlen(after);
-    char *after_copy = (char *)malloc((after_copy_lenght + 1) * sizeof(char));
-    memcpy(after_copy, after, after_copy_lenght);
-    after_copy[after_copy_lenght] = '\0';
-
-    va_start(args, times);
-
-    int i;
-    for (i = 0; i < times; i++) {
-        key_value = va_arg(args, CharsBlock);
-
-        char *tmp_block_copy = block_copy;
-
-        while (tmp_block_copy < block_copy_end) {
-            if (strncmp(tmp_block_copy, "{{", strlen("{{")) == 0) {
-                char *token = tmp_block_copy + strlen("{{");
-
-                char *token_start;
-                char *token_end;
-
-                while (isspace(*token)) {
-                    token++;
-                }
-
-                token_start = token;
-
-                while (!isspace(*token)) {
-                    token++;
-                }
-
-                token_end = token;
-
-                while (isspace(*token)) {
-                    token++;
-                }
-
-                if (strncmp(token, "}}", strlen("}}")) == 0) {
-                    token += strlen("}}");
-                    size_t length = token_end - token_start;
-
-                    if (key_value.start_addr && key_value.end_addr) {
-                        char *value = get_value(token_start, length, key_value);
-
-                        if (value) {
-                            size_t val_length = strlen(value);
-                            memcpy(start, value, val_length);
-
-                            tmp_block_copy = token;
-                            start += val_length;
-
-                            printf("\n");
-                            continue;
-                        }
-                    }
-                }
-            }
-
-            *start = *tmp_block_copy;
-
-            start++;
-            tmp_block_copy++;
-        }
-
-        after = start;
-    }
-
-    memcpy(start, after_copy, after_copy_lenght);
-    start[after_copy_lenght] = '\0';
-
-    /** Clean up memory */
-    char *p = start + after_copy_lenght + 1;
-    while (*p != '\0') {
-        *p = '\0';
-    }
-
-    printf("\n");
-
-    va_end(args);
-
-    return strlen(template);
 }
