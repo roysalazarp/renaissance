@@ -1,3 +1,4 @@
+#include <argon2.h>
 #include <arpa/inet.h>
 #include <assert.h>
 #include <ctype.h>
@@ -7,6 +8,7 @@
 #include <libpq-fe.h>
 #include <linux/limits.h>
 #include <netinet/in.h>
+#include <regex.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -21,6 +23,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+/** TODO: Update README and comment all code thoroughly before making the project publicly known */
 
 /*
 +-----------------------------------------------------------------------------------+
@@ -64,6 +68,18 @@
 
 #define URL(path) path "\x20"
 #define URL_WITH_QUERY(path) path "?"
+
+#define HASH_LENGTH 32
+#define SALT_LENGTH 16
+#define PASSWORD_BUFFER 255
+
+/**
+ * TODO: Implement a regular expression for email validation that adheres to the RFC 5322 Official Standard.
+ *       Using RFC 5322 regex as shown in https://emailregex.com causes regcomp to throw error code 13.
+ *
+ * For now we just use a basic regex email validation
+ */
+#define EMAIL_REGEX "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
 
 /*
 +-----------------------------------------------------------------------------------+
@@ -204,6 +220,7 @@ void view_get(Arena *scratch_arena_raw, char *view, Dict replaces);
 void home_get(Arena *scratch_arena_raw);
 void auth_validate_email_post(Arena *scratch_arena_raw);
 void register_create_account_post(Arena *scratch_arena_raw);
+void login_create_session_post(Arena *scratch_arena_raw);
 void not_found(int client_socket);
 void release_resources_and_exit(Arena *scratch_arena_raw, DBConnection *connection);
 
@@ -223,6 +240,7 @@ CharsBlock load_env_variables(const char *filepath);
 void read_file(char **buffer, long *file_size, char *absolute_file_path);
 char *locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
 char *find_value(const char key[], size_t key_length, CharsBlock block);
+int generate_salt(uint8_t *salt, size_t salt_size);
 
 /*
 +-----------------------------------------------------------------------------------+
@@ -556,6 +574,14 @@ void router(Arena *scratch_arena_raw) {
             }
 
             view_get(scratch_arena_raw, "login", replacements);
+            return;
+        }
+    }
+
+    if (strncmp(url.start_addr, URL("/login/create-session"), strlen(URL("/login/create-session"))) == 0) {
+        if (strncmp(method.start_addr, "POST", method.length) == 0) {
+
+            login_create_session_post(scratch_arena_raw);
             return;
         }
     }
@@ -1000,6 +1026,116 @@ QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
+void login_create_session_post(Arena *scratch_arena_raw) {
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+}
+
+int generate_salt(uint8_t *salt, size_t salt_size) {
+    FILE *dev_urandom = fopen("/dev/urandom", "rb");
+    if (dev_urandom == NULL) {
+        fprintf(stderr, "Error opening /dev/urandom\nError code: %d\n", errno);
+        return -1;
+    }
+
+    if (fread(salt, 1, salt_size, dev_urandom) != salt_size) {
+        fprintf(stderr, "Error reading from /dev/urandom\nError code: %d\n", errno);
+        fclose(dev_urandom);
+        return -1;
+    }
+
+    fclose(dev_urandom);
+
+    return 0;
+}
+
+int copy_string_into_buffer(char *buffer, const char *string) {
+    size_t string_length = strlen(string);
+
+    if (memcpy(buffer, string, string_length) == NULL) {
+        fprintf(stderr, "Failed to copy string into buffer\nError code: %d\n", errno);
+        return -1;
+    }
+
+    buffer[string_length] = '\0';
+
+    return 0;
+}
+
+int validate_repeat_password(char *error_message_buffer, const char *password, const char *repeat_password) {
+    if (strlen(password) == 0) {
+        if (copy_string_into_buffer(error_message_buffer, "Should provide a repeat password") == -1) {
+            return -1;
+        }
+
+        return 0;
+    }
+
+    if (strcmp(password, repeat_password) != 0) {
+        if (copy_string_into_buffer(error_message_buffer, "Password and repeat password should match") == -1) {
+            return -1;
+        }
+
+        return 0;
+    }
+
+    if (copy_string_into_buffer(error_message_buffer, "") == -1) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int validate_password(char *error_message_buffer, const char *password) {
+    if (strlen(password) == 0) {
+        if (copy_string_into_buffer(error_message_buffer, "Should provide a password") == -1) {
+            return -1;
+        }
+
+        return 0;
+    }
+
+    if (strlen(password) < 4) {
+        if (copy_string_into_buffer(error_message_buffer, "Password should be at least 4 characters") == -1) {
+            return -1;
+        }
+
+        return 0;
+    }
+
+    if (copy_string_into_buffer(error_message_buffer, "") == -1) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int validate_email(char *error_message_buffer, const char *email) {
+    regex_t regex;
+
+    if (regcomp(&regex, EMAIL_REGEX, REG_EXTENDED) != 0) {
+        fprintf(stderr, "Could not compile regex\nError code: %d\n", errno);
+        return -1;
+    }
+
+    if (regexec(&regex, email, 0, NULL, 0) == REG_NOMATCH) {
+        if (copy_string_into_buffer(error_message_buffer, "Email should be of format example@example.com") == -1) {
+            return -1;
+        }
+
+        return 0;
+    }
+
+    if (copy_string_into_buffer(error_message_buffer, "") == -1) {
+        return -1;
+    }
+
+    return 0;
+}
+
+/**
+ * TODO: ADD FUNCTION DOCUMENTATION
+ */
 void register_create_account_post(Arena *scratch_arena_raw) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
@@ -1028,13 +1164,55 @@ void register_create_account_post(Arena *scratch_arena_raw) {
     Dict params = parse_and_decode_params(scratch_arena_raw, body);
 
     char *email = find_value("email", strlen("email"), params);
-    char *user_password = find_value("password", strlen("password"), params);
+    char *password = find_value("password", strlen("password"), params);
+    char *repeat_password = find_value("repeat-password", strlen("repeat-password"), params);
+
+    char validation_error_msg[255];
+
+    if (validate_email(validation_error_msg, email) == -1) {
+    }
+
+    if (validate_password(validation_error_msg, password) == -1) {
+    }
+
+    if (validate_repeat_password(validation_error_msg, password, repeat_password) == -1) {
+    }
+
+    /** Hash user password */
+    uint8_t salt[SALT_LENGTH];
+    memset(salt, 0, SALT_LENGTH);
+
+    if (generate_salt(salt, SALT_LENGTH) == -1) {
+    }
+
+    uint32_t t_cost = 2;         /* 2-pass computation */
+    uint32_t m_cost = (1 << 16); /* 64 mebibytes memory usage */
+    uint32_t parallelism = 1;    /* number of threads and lanes */
+
+    uint8_t hash[HASH_LENGTH];
+    memset(hash, 0, HASH_LENGTH);
+
+    char secure_password[PASSWORD_BUFFER];
+    memset(secure_password, 0, PASSWORD_BUFFER);
+    if (argon2i_hash_raw(t_cost, m_cost, parallelism, password, strlen(password), salt, SALT_LENGTH, hash, HASH_LENGTH) != ARGON2_OK) {
+        fprintf(stderr, "Failed to create hash from password\nError code: %d\n", errno);
+    }
+
+    if (argon2i_hash_encoded(t_cost, m_cost, parallelism, password, strlen(password), salt, SALT_LENGTH, HASH_LENGTH, secure_password, PASSWORD_BUFFER) != ARGON2_OK) {
+        fprintf(stderr, "Failed to encode hash\nError code: %d\n", errno);
+    }
+
+    if (argon2i_verify(secure_password, password, strlen(password)) != ARGON2_OK) {
+        fprintf(stderr, "Failed to verify password\nError code: %d\n", errno);
+    }
+
+    printf("%s\n", secure_password);
 
     const char *command = "INSERT INTO app.users (email, password) VALUES ($1, $2)";
     Oid paramTypes[2] = {25, 25};
     const char *paramValues[2];
     paramValues[0] = email;
-    paramValues[1] = user_password;
+    paramValues[1] = password;
     int paramLengths[2] = {0, 0};
     int paramFormats[2] = {0, 0};
     int resultFormat = 0;

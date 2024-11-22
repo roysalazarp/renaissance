@@ -20,4 +20,8 @@ gcc \
     -I/workspaces/postgresql-16.0/src/interfaces/libpq \
     -I/workspaces/postgresql-16.0/src/include \
     -L/workspaces/postgresql-16.0/pgsql/lib \
-    -lpq
+    -lpq \
+    -I/workspaces/phc-winner-argon2/include \
+    -L/workspaces/phc-winner-argon2 \
+    -largon2 \
+    -pthread # Required by largon2

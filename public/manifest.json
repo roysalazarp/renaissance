@@ -1,7 +1,7 @@
 {
     "name": "Chef Casa",
     "short_name": "Chef Casa",
-    "start_url": "/",
+    "start_url": "/auth",
     "display": "standalone",
     "background_color": "#01B469",
     "theme_color": "#01B469",

@@ -2,7 +2,7 @@
     "configurations": [
         {
             "name": "Linux",
-            "includePath": ["${workspaceFolder}/**", "/workspaces/postgresql-16.0/src/interfaces/libpq", "/workspaces/postgresql-16.0/src/include"],
+            "includePath": ["${workspaceFolder}/**", "/workspaces/postgresql-16.0/src/interfaces/libpq", "/workspaces/postgresql-16.0/src/include", "/workspaces/phc-winner-argon2", "/workspaces/phc-winner-argon2/include"],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",
             "cStandard": "c17",

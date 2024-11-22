@@ -12,7 +12,7 @@
             "environment": [
                 {
                     "name": "LD_LIBRARY_PATH",
-                    "value": "/workspaces/postgresql-16.0/pgsql/lib"
+                    "value": "/workspaces/postgresql-16.0/pgsql/lib:/workspaces/phc-winner-argon2"
                 }
             ],
             "externalConsole": false,
