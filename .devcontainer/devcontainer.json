@@ -1,7 +1,15 @@
 {
     "name": "Debian",
-    "image": "mcr.microsoft.com/devcontainers/base:bullseye",
-    "forwardPorts": [8080],
+    "image": "mcr.microsoft.com/devcontainers/base:bookworm",
+    "forwardPorts": [443],
+    "portsAttributes": {
+        "443": {
+            "protocol": "https",
+            "elevateIfNeeded": true,
+            "label": "Application",
+            "onAutoForward": "notify"
+        }
+    },
     "customizations": {
         "vscode": {
             "extensions": ["ms-vscode.cpptools-themes", "eamodio.gitlens", "ms-vscode.hexeditor", "esbenp.prettier-vscode", "rangav.vscode-thunder-client", "ms-vscode.cpptools", "fabiospampinato.vscode-highlight"]

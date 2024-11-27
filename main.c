@@ -5,9 +5,11 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <libpq-fe.h>
 #include <linux/limits.h>
 #include <netinet/in.h>
+#include <openssl/err.h>
+#include <openssl/rand.h>
+#include <openssl/ssl.h>
 #include <regex.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -24,6 +26,11 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#include <libpq-fe.h>
+#pragma GCC diagnostic pop
+
 /** TODO: Update README and comment all code thoroughly before making the project publicly known */
 
 /*
@@ -36,7 +43,9 @@
 #define MAP_ANONYMOUS 0x20
 #endif
 
-#define MAX_PATH_LENGTH 200
+#define ENV_FILE_PATH "./.env"
+
+#define MAX_PATH_LENGTH 300
 #define MAX_FILES 20
 #define MAX_CONNECTIONS 100 /** ?? */
 #define CONNECTION_POOL_SIZE 5
@@ -153,6 +162,7 @@ typedef struct {
 
 typedef struct {
     Arena *arena;
+    SSL *ssl;
     int client_socket;
     CharsBlock request;
     CharsBlock response;
@@ -207,7 +217,7 @@ size_t html_minify(char *buffer, char *html, size_t html_length);
 
 /** Connection */
 char *load_db_connection_string(const char *filepath);
-void create_connection_pool(const char *conn_info);
+void create_connection_pool();
 DBConnection *get_connection(Arena *scratch_arena_raw);
 QueuedRequest *put_in_queue(Arena *scratch_arena_raw);
 PGresult *get_result(DBConnection *connection);
@@ -237,7 +247,7 @@ Dict parse_and_decode_params(Arena *scratch_arena_raw, String raw_query_params);
 
 /** Utils */
 CharsBlock load_env_variables(const char *filepath);
-void read_file(char **buffer, long *file_size, char *absolute_file_path);
+void read_file(char **buffer, long *file_size, const char *absolute_file_path);
 char *locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
 char *find_value(const char key[], size_t key_length, CharsBlock block);
 int generate_salt(uint8_t *salt, size_t salt_size);
@@ -282,12 +292,12 @@ int main() {
     /** To look up data stored in arena */
     _p_global_arena_data = (GlobalArenaDataLookup *)arena_alloc(_p_global_arena_raw, sizeof(GlobalArenaDataLookup));
 
-    CharsBlock envs = load_env_variables("./.env");
+    CharsBlock envs = load_env_variables(ENV_FILE_PATH);
 
-    const char *public_base_path = find_value("PUBLIC_FOLDER", sizeof("PUBLIC_FOLDER"), envs);
+    const char *public_base_path = find_value("COMPILE_PUBLIC_FOLDER", sizeof("COMPILE_PUBLIC_FOLDER"), envs);
     CharsBlock public_files = load_public_files(public_base_path);
 
-    const char *html_base_path = find_value("TEMPLATES_FOLDER", sizeof("TEMPLATES_FOLDER"), envs);
+    const char *html_base_path = find_value("COMPILE_TEMPLATES_FOLDER", sizeof("COMPILE_TEMPLATES_FOLDER"), envs);
     CharsBlock html_raw_components = load_html_components(html_base_path);
 
     CharsBlock html_components = resolve_html_components_imports(); /** TODO: Review the code inside this function */
@@ -295,18 +305,40 @@ int main() {
     epoll_fd = epoll_create1(0);
     assert(epoll_fd != -1);
 
-    uint16_t port = 8080;
-    Socket *server_socket = create_server_socket(port);
+    const char *port_str = find_value("PORT", sizeof("PORT"), envs);
+
+    char *endptr;
+    long port = strtol(port_str, &endptr, 10);
+
+    if (*endptr != '\0' || port < 0 || port > 65535) {
+        fprintf(stderr, "Invalid port number: %s\n", port_str);
+        assert(0);
+    }
+
+    Socket *server_socket = create_server_socket((uint16_t)port);
     int server_fd = server_socket->fd;
 
     event.events = EPOLLIN;
     event.data.ptr = server_socket;
     assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) != -1);
 
-    printf("Server listening on port: %d...\n", port);
+    const char *crt_path = find_value("COMPILE_CRT_PATH", sizeof("COMPILE_CRT_PATH"), envs);
+    const char *crt_key_path = find_value("COMPILE_CRT_KEY_PATH", sizeof("COMPILE_CRT_KEY_PATH"), envs);
+    const char *crt_ca_path = find_value("COMPILE_CRT_CA_PATH", sizeof("COMPILE_CRT_CA_PATH"), envs);
 
-    char *connection_string = load_db_connection_string("./db_connection_params");
-    create_connection_pool(connection_string);
+    SSL_library_init();
+    OpenSSL_add_all_algorithms();
+    SSL_load_error_strings();
+    SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_server_method());
+    assert(ssl_ctx != NULL);
+    assert(SSL_CTX_use_certificate_file(ssl_ctx, crt_path, SSL_FILETYPE_PEM) > 0);
+    assert(SSL_CTX_use_PrivateKey_file(ssl_ctx, crt_key_path, SSL_FILETYPE_PEM) > 0);
+    assert(SSL_CTX_load_verify_locations(ssl_ctx, crt_ca_path, NULL) > 0);
+    assert(SSL_CTX_check_private_key(ssl_ctx));
+
+    printf("Server listening on port: %d...\n", (int)port);
+
+    create_connection_pool();
 
     struct sockaddr_in client_addr; /** Why is this needed ?? */
     socklen_t client_addr_len = sizeof(client_addr);
@@ -339,6 +371,36 @@ int main() {
                         ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)arena_alloc(scratch_arena_raw, sizeof(ScratchArenaDataLookup));
                         scratch_arena_data->arena = scratch_arena_raw;
                         scratch_arena_data->client_socket = client_fd;
+
+                        /* Create an SSL object for the connection */
+                        SSL *ssl = SSL_new(ssl_ctx);
+                        assert(ssl);
+
+                        scratch_arena_data->ssl = ssl;
+
+                        /* Associate the socket with the SSL object */
+                        SSL_set_fd(ssl, client_fd);
+
+                        /** NOTE: This bellow is likely wrong, test the certificates are ready */
+
+                        /* Perform SSL handshake in non-blocking mode */
+                        int ret = SSL_accept(ssl);
+                        if (ret <= 0) {
+                            int ssl_error = SSL_get_error(ssl, ret);
+                            if (ssl_error == SSL_ERROR_WANT_READ) {
+                                /* Need to wait for the socket to be readable */
+                                break; /* Continue waiting for epoll to notify us */
+                            } else if (ssl_error == SSL_ERROR_WANT_WRITE) {
+                                /* Need to wait for the socket to be writable */
+                                break; /* Continue waiting for epoll to notify us */
+                            } else if (ssl_error == SSL_ERROR_SSL) {
+                                /* A serious error occurred; print more information */
+                                fprintf(stderr, "SSL Error: SSL_ERROR_SSL\n");
+                                ERR_print_errors_fp(stderr); /* Print the detailed OpenSSL error */
+                            }
+                        }
+
+                        printf("SSL handshake completed for client-fd: %d\n", client_fd);
 
                         event.events = EPOLLIN | EPOLLET;
                         event.data.ptr = client_socket_info;
@@ -419,6 +481,7 @@ int main() {
         }
     }
 
+    SSL_CTX_free(ssl_ctx);
     close(server_fd);
 
     arena_free(_p_global_arena_raw);
@@ -433,6 +496,7 @@ void router(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     int client_socket = scratch_arena_data->client_socket;
+    SSL *ssl = scratch_arena_data->ssl;
 
     char *request = (char *)scratch_arena_raw->current;
     scratch_arena_data->request.start_addr = scratch_arena_raw->current;
@@ -451,15 +515,15 @@ void router(Arena *scratch_arena_raw) {
     while (1) {
         char *advanced_request_ptr = tmp_request + read_stream;
 
-        ssize_t incomming_stream_size = recv(client_socket, advanced_request_ptr, buffer_size - read_stream, 0);
-        if (incomming_stream_size == -1) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                if (read_stream > 0) {
-                    break;
-                }
+        ssize_t incomming_stream_size = SSL_read(ssl, advanced_request_ptr, buffer_size - read_stream);
 
-                longjmp(ctx, 1);
+        int ssl_error = SSL_get_error(ssl, incomming_stream_size);
+        if (ssl_error == SSL_ERROR_WANT_READ) {
+            if (read_stream > 0) {
+                break;
             }
+
+            longjmp(ctx, 1);
         }
 
         if (incomming_stream_size <= 0) {
@@ -909,6 +973,7 @@ void view_get(Arena *scratch_arena_raw, char *view, Dict replaces) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     int client_socket = scratch_arena_data->client_socket;
+    SSL *ssl = scratch_arena_data->ssl;
 
     char *template = find_value(view, strlen(view), p_global_arena_data->html.component_dict);
 
@@ -941,9 +1006,10 @@ void view_get(Arena *scratch_arena_raw, char *view, Dict replaces) {
     sprintf(response, "%s%s", response_headers, template);
     response[response_length] = '\0';
 
-    if (send(client_socket, response, strlen(response), 0) == -1) {
+    if (SSL_write(ssl, response, strlen(response)) == -1) {
     }
 
+    SSL_free(ssl);
     close(client_socket);
 
     arena_free(scratch_arena_raw);
@@ -1261,10 +1327,12 @@ void register_create_account_post(Arena *scratch_arena_raw) {
     char response_headers[] = "HTTP/1.1 200 OK\r\nHX-Redirect: /\r\n\r\n";
 
     int client_socket = scratch_arena_data->client_socket;
+    SSL *ssl = scratch_arena_data->ssl;
 
-    if (send(client_socket, response_headers, strlen((char *)response_headers), 0) == -1) {
+    if (SSL_write(ssl, response_headers, strlen((char *)response_headers)) == -1) {
     }
 
+    SSL_free(ssl);
     close(client_socket);
 
     release_resources_and_exit(scratch_arena_raw, connection);
@@ -1405,10 +1473,12 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
     }
 
     int client_socket = scratch_arena_data->client_socket;
+    SSL *ssl = scratch_arena_data->ssl;
 
-    if (send(client_socket, response_headers, strlen((char *)response_headers), 0) == -1) {
+    if (SSL_write(ssl, response_headers, strlen((char *)response_headers)) == -1) {
     }
 
+    SSL_free(ssl);
     close(scratch_arena_data->client_socket);
 
     uint8_t was_queued = connection->client.queued;
@@ -1444,7 +1514,7 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
  * is allocated from the arena.
  */
 char *file_content_type(Arena *scratch_arena_raw, const char *path) {
-    char *path_end = path + strlen(path);
+    const char *path_end = path + strlen(path);
 
     while (path < path_end) {
         if (strncmp(path_end, ".css", strlen(".css")) == 0) {
@@ -1493,8 +1563,9 @@ void public_get(Arena *scratch_arena_raw, String url) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     int client_socket = scratch_arena_data->client_socket;
+    SSL *ssl = scratch_arena_data->ssl;
 
-    const char *base_path = find_value("PUBLIC_FOLDER", sizeof("PUBLIC_FOLDER"), p_global_arena_data->envs);
+    const char *base_path = find_value("COMPILE_PUBLIC_FOLDER", sizeof("COMPILE_PUBLIC_FOLDER"), p_global_arena_data->envs);
 
     char *path = (char *)arena_alloc(scratch_arena_raw, sizeof('.') + url.length);
     char *tmp_path = path;
@@ -1522,9 +1593,10 @@ void public_get(Arena *scratch_arena_raw, String url) {
     scratch_arena_data->response.end_addr = response_end;
     scratch_arena_raw->current = response_end + 1;
 
-    if (send(client_socket, response, strlen(response), 0) == -1) {
+    if (SSL_write(ssl, response, strlen(response)) == -1) {
     }
 
+    SSL_free(ssl);
     close(client_socket);
 
     arena_free(scratch_arena_raw);
@@ -1696,7 +1768,9 @@ size_t render_for(char *template, char *block_name, int times, ...) {
     char *block_copy_end = block_copy + block_length;
 
     char *start = block.opening_tag.before;
+    /*
     char *after = block.closing_tag.after;
+    */
 
     size_t after_copy_lenght = strlen(block.closing_tag.after);
     char *after_copy = (char *)malloc((after_copy_lenght + 1) * sizeof(char));
@@ -1760,7 +1834,9 @@ size_t render_for(char *template, char *block_name, int times, ...) {
             ptr++;
         }
 
+        /*
         after = start;
+        */
     }
 
     memcpy(start, after_copy, after_copy_lenght);
@@ -1916,10 +1992,12 @@ void home_get(Arena *scratch_arena_raw) {
     sprintf(response, "%s%s", response_headers, template_cpy);
     response[response_length] = '\0';
 
-    int resl = send(scratch_arena_data->client_socket, response, strlen(response), 0);
+    int resl = SSL_write(scratch_arena_data->ssl, response, strlen(response));
     if (resl == -1) {
         /** TODO: Write error to logs */
     }
+
+    SSL_free(scratch_arena_data->ssl);
 
     close(scratch_arena_data->client_socket);
     printf("Terminated - client-fd: %d\n", scratch_arena_data->client_socket);
@@ -2100,7 +2178,7 @@ char *locate_files(char *buffer, const char *base_path, const char *extension, u
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-void read_file(char **buffer, long *file_size, char *absolute_file_path) {
+void read_file(char **buffer, long *file_size, const char *absolute_file_path) {
     FILE *file = fopen(absolute_file_path, "r");
     assert(file != NULL);
     assert(fseek(file, 0, SEEK_END) != -1);
@@ -2866,10 +2944,26 @@ Socket *create_server_socket(uint16_t port) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-void create_connection_pool(const char *conn_info) {
+void create_connection_pool() {
+    Arena *p_global_arena_raw = _p_global_arena_raw;
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+
     uint8_t i;
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
-        connection_pool[i].conn = PQconnectStart(conn_info);
+        char *database = find_value("DB_NAME", sizeof("DB_NAME"), p_global_arena_data->envs);
+        char *user = find_value("DB_USER", sizeof("DB_USER"), p_global_arena_data->envs);
+        char *password = find_value("PASSWORD", sizeof("PASSWORD"), p_global_arena_data->envs);
+        char *host = find_value("HOST", sizeof("HOST"), p_global_arena_data->envs);
+
+        const char *keys[] = {"dbname", "user", "password", "host", NULL};
+        const char *values[5];
+        values[0] = database;
+        values[1] = user;
+        values[2] = password;
+        values[3] = host;
+        values[4] = NULL;
+
+        connection_pool[i].conn = PQconnectStartParams(keys, values, 0);
         if (PQstatus(connection_pool[i].conn) != CONNECTION_BAD) {
             PQsetnonblocking(connection_pool[i].conn, 1);
 

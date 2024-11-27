@@ -12,6 +12,7 @@
         "ostream": "c",
         "ranges": "c",
         "tuple": "c",
-        "utility": "c"
+        "utility": "c",
+        "rand.h": "c"
     }
 }

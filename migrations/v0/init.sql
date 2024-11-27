@@ -19,9 +19,6 @@ CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION renaissance_app;
 -- Let's make sure no one uses the public schema.
 REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;
 
--- to use uuid_generate_v4() function
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
 /**
  * After creating the renaissance_app user, need to:
  * 
