@@ -9,6 +9,6 @@ RUN apt-get install -y \
     postgresql-17 \
     postgresql-client-17 \
     postgresql-contrib-17 \
-    libpq-dev=17.2-1.pgdg120+1 \
+    libpq-dev \
     gdb \
     && apt-get clean
