@@ -1,8 +1,6 @@
 {
     "name": "Debian",
-    "build": {
-        "dockerfile": "./Dockerfile"
-    },
+    "image": "mcr.microsoft.com/devcontainers/base:bookworm",
     "forwardPorts": [443],
     "portsAttributes": {
         "443": {
