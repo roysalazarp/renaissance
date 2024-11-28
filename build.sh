@@ -28,7 +28,6 @@ if [ "$BUILD_ENV" == "prod" ]; then
         -lpq \
         -largon2 \
         -pthread \
-        -L/lib/x86_64-linux-gnu/libssl.so.3 \
         -lssl \
         -lcrypto
 
@@ -51,7 +50,6 @@ elif [ "$BUILD_ENV" == "dev" ]; then
         -lpq \
         -largon2 \
         -pthread \
-        -L/lib/x86_64-linux-gnu/libssl.so.3 \
         -lssl \
         -lcrypto
 
