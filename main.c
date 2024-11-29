@@ -287,7 +287,7 @@ jmp_buf db_ctx;
 int main() {
     int i;
 
-    _p_global_arena_raw = arena_init(PAGE_SIZE * 20);
+    _p_global_arena_raw = arena_init(PAGE_SIZE * 25);
 
     /** To look up data stored in arena */
     _p_global_arena_data = (GlobalArenaDataLookup *)arena_alloc(_p_global_arena_raw, sizeof(GlobalArenaDataLookup));
@@ -381,26 +381,12 @@ int main() {
                         /* Associate the socket with the SSL object */
                         SSL_set_fd(ssl, client_fd);
 
-                        /** NOTE: This bellow is likely wrong, test the certificates are ready */
-
                         /* Perform SSL handshake in non-blocking mode */
                         int ret = SSL_accept(ssl);
-                        if (ret <= 0) {
-                            int ssl_error = SSL_get_error(ssl, ret);
-                            if (ssl_error == SSL_ERROR_WANT_READ) {
-                                /* Need to wait for the socket to be readable */
-                                break; /* Continue waiting for epoll to notify us */
-                            } else if (ssl_error == SSL_ERROR_WANT_WRITE) {
-                                /* Need to wait for the socket to be writable */
-                                break; /* Continue waiting for epoll to notify us */
-                            } else if (ssl_error == SSL_ERROR_SSL) {
-                                /* A serious error occurred; print more information */
-                                fprintf(stderr, "SSL Error: SSL_ERROR_SSL\n");
-                                ERR_print_errors_fp(stderr); /* Print the detailed OpenSSL error */
-                            }
-                        }
 
-                        printf("SSL handshake completed for client-fd: %d\n", client_fd);
+                        int ssl_error = SSL_get_error(ssl, ret);
+
+                        assert(ssl_error == SSL_ERROR_WANT_READ);
 
                         event.events = EPOLLIN | EPOLLET;
                         event.data.ptr = client_socket_info;
@@ -623,8 +609,21 @@ void router(Arena *scratch_arena_raw) {
 
     if (strncmp(url.start_addr, URL("/"), strlen(URL("/"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
+
+            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request.start_addr);
+            Dict replacements = {0};
+
+            if (query_params.length > 0) {
+                replacements = parse_and_decode_params(scratch_arena_raw, query_params);
+            }
+
+            view_get(scratch_arena_raw, "home", replacements);
+            return;
+
+            /*
             home_get(scratch_arena_raw);
             return;
+            */
         }
     }
 
@@ -676,7 +675,7 @@ void router(Arena *scratch_arena_raw) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
             String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request.start_addr);
 
-            Dict replacements;
+            Dict replacements = {0};
             if (query_params.length > 0) {
                 replacements = parse_and_decode_params(scratch_arena_raw, query_params);
             }
@@ -1231,7 +1230,7 @@ void register_create_account_post(Arena *scratch_arena_raw) {
 
     char *email = find_value("email", strlen("email"), params);
     char *password = find_value("password", strlen("password"), params);
-    char *repeat_password = find_value("repeat-password", strlen("repeat-password"), params);
+    char *repeat_password = find_value("password-again", strlen("password-again"), params);
 
     char validation_error_msg[255];
 
@@ -1278,7 +1277,7 @@ void register_create_account_post(Arena *scratch_arena_raw) {
     Oid paramTypes[2] = {25, 25};
     const char *paramValues[2];
     paramValues[0] = email;
-    paramValues[1] = password;
+    paramValues[1] = secure_password;
     int paramLengths[2] = {0, 0};
     int paramFormats[2] = {0, 0};
     int resultFormat = 0;
@@ -1464,6 +1463,7 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
 
     char *response_headers[200];
 
+    body = find_body(scratch_arena_data->request);
     String encoded_email = find_body_value("email", body);
 
     if (rows > 0) {

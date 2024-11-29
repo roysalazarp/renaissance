@@ -1,69 +1,87 @@
 <x-component-def name="register">
-    <x-component name="root_layout">
-        <x-template>Register</x-template>
-        <x-template>
-            <a href="/auth" class="absolute top-4 left-4 text-gray-600 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-300 rounded-full p-2 bg-gray-200 hover:bg-gray-300 transition-colors duration-200 z-10" aria-label="Go back">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-                </svg>
-            </a>
-            <div class="h-screen p-6 space-y-6">
-                <h2 class="text-2xl font-bold text-center text-gray-900">Register</h2>
-                <form hx-post="/register/create-account" hx-swap="none">
-                    <div class="space-y-4">
-                        <div class="space-y-2">
-                            <label for="email" class="text-sm font-medium text-gray-700">Email</label>
-                            <div class="relative">
-                                <input type="email" id="email" name="email" value="%email%" readonly class="w-full px-3 py-2 bg-gray-100 border border-gray-300 rounded-md shadow-sm text-gray-500 cursor-not-allowed" />
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400 absolute right-3 top-1/2 transform -translate-y-1/2" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd" />
-                                </svg>
-                            </div>
-                        </div>
-                        <div class="space-y-2">
-                            <label for="password" class="text-sm font-medium text-gray-700">Password</label>
-                            <input type="password" id="password" name="password" required class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500" placeholder="Enter your password" />
-                        </div>
-                        <div class="space-y-2">
-                            <label for="repeat-password" class="text-sm font-medium text-gray-700">Password again</label>
-                            <input type="password" id="repeat-password" name="repeat-password" required class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500" placeholder="Enter your password again" />
-                        </div>
-                        <div class="pt-4 pb-2">
-                            <div class="flex items-center justify-between">
-                                <div class="flex items-center space-x-2">
-                                    <span class="text-sm font-medium text-gray-700">Accept Terms</span>
-                                    <button type="button" role="switch" aria-checked="false" id="terms" class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500" aria-labelledby="terms-description">
-                                        <span aria-hidden="true" class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
-                                    </button>
-                                </div>
-                            </div>
-                            <p class="mt-2 text-xs text-gray-500 leading-relaxed">By accepting, you agree to our <a href="#" class="text-blue-600 hover:underline font-medium">Terms of Service</a> and acknowledge that you have read our <a href="#" class="text-blue-600 hover:underline font-medium">Privacy Policy</a>.</p>
-                        </div>
+    <!DOCTYPE html>
+    <html lang="en">
+        <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="viewport-fit=cover,width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,user-scalable=no" />
+            <title>Little Chef - Register</title>
+
+            <link rel="manifest" href="public/manifest.json" />
+            <script src="https://unpkg.com/htmx.org@1.9.10" integrity="sha384-D1Kt99CQMDuVetoL1lrYwg5t+9QdHe7NLX/SoJYkXDFfX37iInKRy5xLSi8nO7UC" crossorigin="anonymous"></script>
+
+            <link rel="preconnect" href="https://fonts.googleapis.com" />
+            <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+            <link href="https://fonts.googleapis.com/css2?family=Agbalumo&family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap" rel="stylesheet" />
+
+            <script src="https://cdn.tailwindcss.com"></script>
+            <script src="public/views/register/index.js"></script>
+            <link rel="stylesheet" href="public/views/register/index.css" />
+        </head>
+        <body class="bg-black text-white h-dvh px-4 py-8 flex flex-col justify-between items-center">
+            <div class="max-w-xl w-full flex flex-col">
+                <div class="flex justify-start mb-6">
+                    <a href="/auth" class="text-gray-600 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-300 rounded-full p-2 bg-[#1A1A1A] hover:bg-gray-300 transition-colors duration-200 z-10" aria-label="Go back">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="white">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                        </svg>
+                    </a>
+                </div>
+                <h1 class="text-3xl font-bold">Register</h1>
+                <form id="register-form" hx-post="/register/create-account" hx-swap="none" class="mt-8">
+                    <div class="relative float-label-input mb-6">
+                        <input type="email" id="email" name="email" value="%email%" readonly class="w-full h-14 px-10 bg-[#1A1A1A] text-base text-[#787878] rounded-lg focus:ring-[#01B269] border border-[#3C3C3C]" placeholder=" " />
+                        <svg xmlns="http://www.w3.org/2000/svg" class="absolute left-3 top-1/2 transform -translate-y-1/2 cursor-pointer w-6 h-6" fill="#787878" viewBox="0 0 26 26">
+                            <path fill-rule="evenodd" d="M12 1.5a5.25 5.25 0 0 0-5.25 5.25v3a3 3 0 0 0-3 3v6.75a3 3 0 0 0 3 3h10.5a3 3 0 0 0 3-3v-6.75a3 3 0 0 0-3-3v-3c0-2.9-2.35-5.25-5.25-5.25Zm3.75 8.25v-3a3.75 3.75 0 1 0-7.5 0v3h7.5Z" clip-rule="evenodd" />
+                        </svg>
                     </div>
-                    <div class="mt-6">
-                        <button type="submit" class="w-full px-4 py-2 text-white bg-blue-600 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">Next</button>
+                    <div class="relative float-label-input-password mb-6">
+                        <input type="password" id="password" name="password" required class="w-full h-14 px-4 pt-2 bg-[#1A1A1A] text-base text-white rounded-lg focus:ring-[#01B269] border border-[#3C3C3C]" placeholder=" " autocomplete="on" />
+                        <label for="password" class="absolute left-4 top-4 text-[#787878] transition-all duration-200 pointer-events-none"> Password </label>
+
+                        <svg id="clear-icon-password" class="absolute right-4 top-1/2 transform -translate-y-1/2 text-[#888888] cursor-pointer w-7 h-7" xmlns="http://www.w3.org/2000/svg" style="visibility: hidden" viewBox="0 0 26 26">
+                            <path
+                                fill-rule="evenodd"
+                                clip-rule="evenodd"
+                                d="M13 0C5.82 0 0 5.82 0 13C0 20.18 5.82 26 13 26C20.18 26 26 20.18 26 13C26 5.82 20.18 0 13 0ZM10.7067 9.29333C10.6151 9.19508 10.5047 9.11628 10.3821 9.06163C10.2594 9.00697 10.127 8.97758 9.9927 8.97521C9.85843 8.97284 9.72505 8.99754 9.60054 9.04784C9.47602 9.09813 9.36291 9.17299 9.26795 9.26795C9.17299 9.36291 9.09813 9.47602 9.04784 9.60054C8.99754 9.72505 8.97284 9.85843 8.97521 9.9927C8.97758 10.127 9.00697 10.2594 9.06163 10.3821C9.11628 10.5047 9.19508 10.6151 9.29333 10.7067L11.5867 13L9.29333 15.2933C9.19508 15.3849 9.11628 15.4953 9.06163 15.6179C9.00697 15.7406 8.97758 15.873 8.97521 16.0073C8.97284 16.1416 8.99754 16.2749 9.04784 16.3995C9.09813 16.524 9.17299 16.6371 9.26795 16.7321C9.36291 16.827 9.47602 16.9019 9.60054 16.9522C9.72505 17.0025 9.85843 17.0272 9.9927 17.0248C10.127 17.0224 10.2594 16.993 10.3821 16.9384C10.5047 16.8837 10.6151 16.8049 10.7067 16.7067L13 14.4133L15.2933 16.7067C15.3849 16.8049 15.4953 16.8837 15.6179 16.9384C15.7406 16.993 15.873 17.0224 16.0073 17.0248C16.1416 17.0272 16.2749 17.0025 16.3995 16.9522C16.524 16.9019 16.6371 16.827 16.7321 16.7321C16.827 16.6371 16.9019 16.524 16.9522 16.3995C17.0025 16.2749 17.0272 16.1416 17.0248 16.0073C17.0224 15.873 16.993 15.7406 16.9384 15.6179C16.8837 15.4953 16.8049 15.3849 16.7067 15.2933L14.4133 13L16.7067 10.7067C16.8049 10.6151 16.8837 10.5047 16.9384 10.3821C16.993 10.2594 17.0224 10.127 17.0248 9.9927C17.0272 9.85843 17.0025 9.72505 16.9522 9.60054C16.9019 9.47602 16.827 9.36291 16.7321 9.26795C16.6371 9.17299 16.524 9.09813 16.3995 9.04784C16.2749 8.99754 16.1416 8.97284 16.0073 8.97521C15.873 8.97758 15.7406 9.00697 15.6179 9.06163C15.4953 9.11628 15.3849 9.19508 15.2933 9.29333L13 11.5867L10.7067 9.29333Z"
+                                fill="#3C3C3C"
+                            />
+                        </svg>
+                    </div>
+                    <div class="relative float-label-input-password-again mb-6">
+                        <input type="password" id="password-again" name="password-again" required class="w-full h-14 px-4 pt-2 bg-[#1A1A1A] text-base text-white rounded-lg focus:ring-[#01B269] border border-[#3C3C3C]" placeholder=" " autocomplete="on" />
+                        <label for="password-again" class="absolute left-4 top-4 text-[#787878] transition-all duration-200 pointer-events-none"> Password again </label>
+
+                        <svg id="clear-icon-password-again" class="absolute right-4 top-1/2 transform -translate-y-1/2 text-[#888888] cursor-pointer w-7 h-7" xmlns="http://www.w3.org/2000/svg" style="visibility: hidden" viewBox="0 0 26 26">
+                            <path
+                                fill-rule="evenodd"
+                                clip-rule="evenodd"
+                                d="M13 0C5.82 0 0 5.82 0 13C0 20.18 5.82 26 13 26C20.18 26 26 20.18 26 13C26 5.82 20.18 0 13 0ZM10.7067 9.29333C10.6151 9.19508 10.5047 9.11628 10.3821 9.06163C10.2594 9.00697 10.127 8.97758 9.9927 8.97521C9.85843 8.97284 9.72505 8.99754 9.60054 9.04784C9.47602 9.09813 9.36291 9.17299 9.26795 9.26795C9.17299 9.36291 9.09813 9.47602 9.04784 9.60054C8.99754 9.72505 8.97284 9.85843 8.97521 9.9927C8.97758 10.127 9.00697 10.2594 9.06163 10.3821C9.11628 10.5047 9.19508 10.6151 9.29333 10.7067L11.5867 13L9.29333 15.2933C9.19508 15.3849 9.11628 15.4953 9.06163 15.6179C9.00697 15.7406 8.97758 15.873 8.97521 16.0073C8.97284 16.1416 8.99754 16.2749 9.04784 16.3995C9.09813 16.524 9.17299 16.6371 9.26795 16.7321C9.36291 16.827 9.47602 16.9019 9.60054 16.9522C9.72505 17.0025 9.85843 17.0272 9.9927 17.0248C10.127 17.0224 10.2594 16.993 10.3821 16.9384C10.5047 16.8837 10.6151 16.8049 10.7067 16.7067L13 14.4133L15.2933 16.7067C15.3849 16.8049 15.4953 16.8837 15.6179 16.9384C15.7406 16.993 15.873 17.0224 16.0073 17.0248C16.1416 17.0272 16.2749 17.0025 16.3995 16.9522C16.524 16.9019 16.6371 16.827 16.7321 16.7321C16.827 16.6371 16.9019 16.524 16.9522 16.3995C17.0025 16.2749 17.0272 16.1416 17.0248 16.0073C17.0224 15.873 16.993 15.7406 16.9384 15.6179C16.8837 15.4953 16.8049 15.3849 16.7067 15.2933L14.4133 13L16.7067 10.7067C16.8049 10.6151 16.8837 10.5047 16.9384 10.3821C16.993 10.2594 17.0224 10.127 17.0248 9.9927C17.0272 9.85843 17.0025 9.72505 16.9522 9.60054C16.9019 9.47602 16.827 9.36291 16.7321 9.26795C16.6371 9.17299 16.524 9.09813 16.3995 9.04784C16.2749 8.99754 16.1416 8.97284 16.0073 8.97521C15.873 8.97758 15.7406 9.00697 15.6179 9.06163C15.4953 9.11628 15.3849 9.19508 15.2933 9.29333L13 11.5867L10.7067 9.29333Z"
+                                fill="#3C3C3C"
+                            />
+                        </svg>
+                    </div>
+                    <div class="pt-4 pb-2">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center space-x-2">
+                                <span class="text-base font-medium text-[#c3c3c3]">Accept Terms</span>
+                                <button type="button" role="switch" aria-checked="false" id="terms" required class="bg-[#3C3C3C] relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500" aria-labelledby="terms-description">
+                                    <span aria-hidden="true" class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                </button>
+                            </div>
+                        </div>
+                        <p class="mt-2 text-sm text-gray-500 leading-relaxed">
+                            By accepting, you agree to our
+                            <a href="#" class="text-blue-600 hover:underline font-medium">Terms of Service</a>
+                            and acknowledge that you have read our
+                            <a href="#" class="text-blue-600 hover:underline font-medium">Privacy Policy</a>.
+                        </p>
                     </div>
                 </form>
+                <script src="public/views/register/switch.js"></script>
+                <div class="max-w-xl w-full mt-10">
+                    <button type="submit" form="register-form" class="w-full py-3 bg-[#01B269] text-[#101014] font-medium text-base rounded-lg transition-all ease-in-out duration-200 font-semibold">Register</button>
+                </div>
             </div>
-            <script>
-                const toggleSwitch = document.getElementById("terms");
-                toggleSwitch.addEventListener("click", function () {
-                    const isChecked = toggleSwitch.getAttribute("aria-checked") === "true";
-                    toggleSwitch.setAttribute("aria-checked", String(!isChecked));
-                    const switchButton = toggleSwitch.querySelector("span");
-                    if (isChecked) {
-                        switchButton.classList.remove("translate-x-5");
-                        switchButton.classList.add("translate-x-0");
-                        toggleSwitch.classList.remove("bg-blue-600");
-                        toggleSwitch.classList.add("bg-gray-200");
-                    } else {
-                        switchButton.classList.remove("translate-x-0");
-                        switchButton.classList.add("translate-x-5");
-                        toggleSwitch.classList.remove("bg-gray-200");
-                        toggleSwitch.classList.add("bg-blue-600");
-                    }
-                });
-            </script>
-        </x-template>
-    </x-component>
+        </body>
+    </html>
 </x-component-def>

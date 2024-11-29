@@ -21,8 +21,8 @@ if [ "$BUILD_ENV" == "prod" ]; then
   
     gcc \
         -std=c89 \
-        -O2 \
-        -o "$BUILD_DIR/main" \
+        -g \
+        -o "$BUILD_DIR/app" \
         main.c \
         -I/usr/include/postgresql \
         -lpq \
@@ -44,7 +44,7 @@ elif [ "$BUILD_ENV" == "dev" ]; then
         -Wno-declaration-after-statement \
         -Wno-unused-variable \
         -Wno-unused-parameter \
-        -o "$BUILD_DIR/main" \
+        -o "$BUILD_DIR/app" \
         main.c \
         -I/usr/include/postgresql \
         -lpq \

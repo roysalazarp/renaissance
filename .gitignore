@@ -3,3 +3,4 @@ build-dev
 build-prod
 .env.prod
 cert
+*.pem
