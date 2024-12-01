@@ -5,6 +5,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libpq-fe.h>
 #include <linux/limits.h>
 #include <netinet/in.h>
 #include <openssl/err.h>
@@ -25,11 +26,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
-#include <libpq-fe.h>
-#pragma GCC diagnostic pop
 
 /** TODO: Update README and comment all code thoroughly before making the project publicly known */
 
@@ -80,11 +76,12 @@
 
 #define HASH_LENGTH 32
 #define SALT_LENGTH 16
-#define PASSWORD_BUFFER 255
+#define PASSWORD_BUFFER 255 /** Do I need this ??? */
 
 /**
- * TODO: Implement a regular expression for email validation that adheres to the RFC 5322 Official Standard.
- *       Using RFC 5322 regex as shown in https://emailregex.com causes regcomp to throw error code 13.
+ * NOTE: Implement a regular expression for email validation that adheres
+ * to the RFC 5322 Official Standard. Using RFC 5322 regex as shown in
+ * https://emailregex.com causes regcomp to throw error code 13.
  *
  * For now we just use a basic regex email validation
  */
@@ -115,27 +112,13 @@ typedef struct {
 } String;
 
 typedef struct {
-    uint8_t *start_addr;
-    uint8_t *end_addr;
-} MemBlock;
-
-typedef struct {
     char *start_addr;
     char *end_addr;
 } CharsBlock;
 
-typedef CharsBlock Dict;
-typedef CharsBlock Location;
-
-typedef struct {
-    char *before;
-    char *after;
-} BlockId;
-
-typedef struct {
-    char *before;
-    char *after;
-} TagLocation;
+typedef CharsBlock Dict;        /** { 'k', 'e', 'y', '\0', 'v', 'a', 'l', 'u', 'e', '\0' ... } */
+typedef CharsBlock StringArray; /** { 'f', 'o', 'o', '\0', 'b', 'a', 'r', '\0', 'b', 'a', 'z', '\0' ... } */
+typedef CharsBlock TagLocation;
 
 typedef struct {
     TagLocation opening_tag;
@@ -144,29 +127,19 @@ typedef struct {
 
 typedef struct {
     char *db_connection_string;
-    CharsBlock envs;
+    Dict envs; /** Should I keep this in the memory ??? */
     Socket *socket;
-    struct {
-        CharsBlock paths;
-        CharsBlock file_dict;
-    } public;
-    struct {
-        struct {
-            CharsBlock paths;
-            uint8_t count;
-            CharsBlock component_dict;
-        } raw;
-        CharsBlock component_dict;
-    } html;
+    Dict public_files_dict;
+    Dict templates;
 } GlobalArenaDataLookup;
 
 typedef struct {
     Arena *arena;
     SSL *ssl;
     int client_socket;
-    CharsBlock request;
-    CharsBlock response;
-    void *local;
+    char *request;
+    char *response;
+    void *local; /** Do I really need this ??? */
 } ScratchArenaDataLookup;
 
 typedef struct {
@@ -205,9 +178,9 @@ void arena_free(Arena *arena);
 void arena_reset(Arena *arena, size_t arena_header_size);
 
 /** Template engine */
-CharsBlock load_public_files(const char *base_path);
-CharsBlock load_html_components(const char *base_path);
-CharsBlock resolve_html_components_imports();
+Dict load_public_files(const char *base_path);
+Dict load_html_components(const char *base_path);
+Dict load_templates(const char *base_path);
 void resolve_slots(char *component_markdown, char *import_statement, char **templates);
 BlockLocation find_block(char *template, char *block_name);
 size_t render_val(char *template, char *value_name, char *value);
@@ -236,7 +209,7 @@ void release_resources_and_exit(Arena *scratch_arena_raw, DBConnection *connecti
 
 /** Request utils */
 String find_http_request_value(const char key[], char *request);
-String find_body(CharsBlock request);
+String find_body(const char *request);
 String find_body_value(const char key[], String body);
 char *file_content_type(Arena *scratch_arena_raw, const char *path);
 char char_to_hex(unsigned char nibble); /** TODO: Review this function */
@@ -246,11 +219,12 @@ size_t url_decode_utf8(char **string, size_t length);
 Dict parse_and_decode_params(Arena *scratch_arena_raw, String raw_query_params);
 
 /** Utils */
-CharsBlock load_env_variables(const char *filepath);
+Dict load_env_variables(const char *filepath);
 void read_file(char **buffer, long *file_size, const char *absolute_file_path);
 char *locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
-char *find_value(const char key[], size_t key_length, CharsBlock block);
+char *find_value(const char key[], size_t key_length, Dict dict);
 int generate_salt(uint8_t *salt, size_t salt_size);
+uint8_t get_dict_size(Dict dict);
 
 /*
 +-----------------------------------------------------------------------------------+
@@ -266,6 +240,32 @@ int nfds;
 struct epoll_event events[MAX_EVENTS];
 struct epoll_event event;
 
+/**
+ * Explanation of the use of setjmp and longjmp:
+ *
+ * - setjmp and longjmp are C functions used for non-local jumps. They allow
+ *   jumping back to a previously saved program state, bypassing normal control flow.
+ * - setjmp saves the program's state into a jmp_buf and returns 0 when called directly.
+ * - longjmp restores the program's state saved by setjmp and makes it return a
+ *   non-zero value, specified by the second argument of longjmp.
+ *
+ * The Problem:
+ * - When longjmp is called, it must pass a non-zero integer (__val) as the second
+ *   argument. If longjmp passes 0, setjmp cannot distinguish it from its initial
+ *   return value (0).
+ * - In this code, we need to pass a value (e.g., the index of a database connection)
+ *   through longjmp. Sometimes the value is 0, but longjmp cannot directly pass 0
+ *   due to the restriction above.
+ *
+ * The Hack (Workaround):
+ * - To address this, the code adjusts the value using macros:
+ *   - `to_index(i)`: Adds 1 to the original index (`i`) before passing it to longjmp.
+ *     This ensures that 0 becomes 1, and other values are incremented similarly.
+ *   - `from_index(i)`: Subtracts 1 to restore the original index. When the value is
+ *     retrieved after longjmp, it is adjusted back to the correct value.
+ * - This ensures that longjmp never passes 0, while the program can still use 0
+ *   as a valid index internally.
+ */
 #define to_index(i) (i + 1)
 #define from_index(i) (i - 1)
 
@@ -287,20 +287,18 @@ jmp_buf db_ctx;
 int main() {
     int i;
 
-    _p_global_arena_raw = arena_init(PAGE_SIZE * 25);
+    _p_global_arena_raw = arena_init(PAGE_SIZE * 20);
 
     /** To look up data stored in arena */
     _p_global_arena_data = (GlobalArenaDataLookup *)arena_alloc(_p_global_arena_raw, sizeof(GlobalArenaDataLookup));
 
-    CharsBlock envs = load_env_variables(ENV_FILE_PATH);
+    Dict envs = load_env_variables(ENV_FILE_PATH);
 
     const char *public_base_path = find_value("COMPILE_PUBLIC_FOLDER", sizeof("COMPILE_PUBLIC_FOLDER"), envs);
-    CharsBlock public_files = load_public_files(public_base_path);
+    Dict public_files = load_public_files(public_base_path);
 
     const char *html_base_path = find_value("COMPILE_TEMPLATES_FOLDER", sizeof("COMPILE_TEMPLATES_FOLDER"), envs);
-    CharsBlock html_raw_components = load_html_components(html_base_path);
-
-    CharsBlock html_components = resolve_html_components_imports(); /** TODO: Review the code inside this function */
+    Dict templates = load_templates(html_base_path); /** TODO: Review the code inside this function */
 
     epoll_fd = epoll_create1(0);
     assert(epoll_fd != -1);
@@ -485,7 +483,7 @@ void router(Arena *scratch_arena_raw) {
     SSL *ssl = scratch_arena_data->ssl;
 
     char *request = (char *)scratch_arena_raw->current;
-    scratch_arena_data->request.start_addr = scratch_arena_raw->current;
+    scratch_arena_data->request = scratch_arena_raw->current;
 
     char *tmp_request = request;
 
@@ -598,9 +596,8 @@ void router(Arena *scratch_arena_raw) {
     tmp_request++;
 
     scratch_arena_raw->current = tmp_request;
-    scratch_arena_data->request.end_addr = (char *)scratch_arena_raw->current - 1;
 
-    String url = find_http_request_value("URL", scratch_arena_data->request.start_addr);
+    String url = find_http_request_value("URL", scratch_arena_data->request);
 
     if (strncmp(url.start_addr, "/public", strlen("/public")) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
         public_get(scratch_arena_raw, url);
@@ -610,7 +607,7 @@ void router(Arena *scratch_arena_raw) {
     if (strncmp(url.start_addr, URL("/"), strlen(URL("/"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
 
-            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request.start_addr);
+            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request);
             Dict replacements = {0};
 
             if (query_params.length > 0) {
@@ -629,7 +626,7 @@ void router(Arena *scratch_arena_raw) {
 
     if (strncmp(url.start_addr, URL("/login"), strlen(URL("/login"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/login"), strlen(URL_WITH_QUERY("/login"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request.start_addr);
+            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request);
             Dict replacements = {0};
 
             if (query_params.length > 0) {
@@ -651,7 +648,7 @@ void router(Arena *scratch_arena_raw) {
 
     if (strncmp(url.start_addr, URL("/register"), strlen(URL("/register"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/register"), strlen(URL_WITH_QUERY("/register"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request.start_addr);
+            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request);
             Dict replacements = {0};
 
             if (query_params.length > 0) {
@@ -673,7 +670,7 @@ void router(Arena *scratch_arena_raw) {
 
     if (strncmp(url.start_addr, URL("/auth"), strlen(URL("/auth"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/auth"), strlen(URL_WITH_QUERY("/auth"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request.start_addr);
+            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request);
 
             Dict replacements = {0};
             if (query_params.length > 0) {
@@ -886,17 +883,18 @@ void resolve_slots(char *component_markdown, char *import_statement, char **temp
  * Scans the `request` for the `\r\n\r\n` sequence that separates headers from the body
  * and returns a pointer to the body start.
  *
- * @param request A `CharsBlock` representing the HTTP request with start and end pointers.
+ * @param request A `String` representing the HTTP request with start and end pointers.
  *
  * @return Pointer to the start of the body or NULL if no body is found.
  */
-String find_body(CharsBlock request) {
+String find_body(const char *request) {
     String body = {0};
-    char *ptr = request.start_addr;
+    char *ptr = (char *)request;
 
     char request_headers_end[] = "\r\n\r\n";
 
-    while (ptr < request.end_addr) {
+    char *request_end = (char *)request + strlen(request);
+    while (ptr < request_end) {
         if (strncmp(ptr, request_headers_end, strlen(request_headers_end)) == 0) {
             ptr += strlen(request_headers_end);
 
@@ -974,7 +972,7 @@ void view_get(Arena *scratch_arena_raw, char *view, Dict replaces) {
     int client_socket = scratch_arena_data->client_socket;
     SSL *ssl = scratch_arena_data->ssl;
 
-    char *template = find_value(view, strlen(view), p_global_arena_data->html.component_dict);
+    char *template = find_value(view, strlen(view), p_global_arena_data->templates);
 
     if (replaces.start_addr) {
         char *template_cpy = (char *)scratch_arena_raw->current;
@@ -1574,10 +1572,10 @@ void public_get(Arena *scratch_arena_raw, String url) {
     strncpy(tmp_path, url.start_addr, url.length);
 
     char *public_file_type = file_content_type(scratch_arena_raw, path);
-    char *content = find_value(path, strlen(path), p_global_arena_data->public.file_dict);
+    char *content = find_value(path, strlen(path), p_global_arena_data->public_files_dict);
 
     char *response = (char *)scratch_arena_raw->current;
-    scratch_arena_data->response.start_addr = response;
+    scratch_arena_data->response = response;
 
     sprintf(response,
             "HTTP/1.1 200 OK\r\n"
@@ -1590,7 +1588,6 @@ void public_get(Arena *scratch_arena_raw, String url) {
         response_end++;
     }
 
-    scratch_arena_data->response.end_addr = response_end;
     scratch_arena_raw->current = response_end + 1;
 
     if (SSL_write(ssl, response, strlen(response)) == -1) {
@@ -1618,8 +1615,8 @@ BlockLocation find_block(char *template, char *block_name) {
         if (strncmp(ptr, block_name, strlen(block_name)) == 0) {
             char *after = ptr + strlen(block_name) + strlen(FOR_OPENING_TAG__END);
 
-            block.opening_tag.before = before;
-            block.opening_tag.after = after;
+            block.opening_tag.start_addr = before;
+            block.opening_tag.end_addr = after;
 
             uint8_t inside = 0;
             while (*ptr != '\0') {
@@ -1631,8 +1628,8 @@ BlockLocation find_block(char *template, char *block_name) {
                     if (inside > 0) {
                         inside--;
                     } else {
-                        block.closing_tag.before = ptr;
-                        block.closing_tag.after = ptr + strlen(FOR_CLOSING_TAG);
+                        block.closing_tag.start_addr = ptr;
+                        block.closing_tag.end_addr = ptr + strlen(FOR_CLOSING_TAG);
 
                         return block;
                     }
@@ -1718,13 +1715,13 @@ size_t render_val(char *template, char *val_name, char *value) {
                 }
 
                 TagLocation val_tag = {0};
-                val_tag.before = ptr;
-                val_tag.after = ptr + strlen(VAL_OPENING_TAG__START) + val_name_length + strlen(VAL_SELF_CLOSING_TAG__END) + 1;
+                val_tag.start_addr = ptr;
+                val_tag.end_addr = ptr + strlen(VAL_OPENING_TAG__START) + val_name_length + strlen(VAL_SELF_CLOSING_TAG__END) + 1;
 
                 if (value) {
                     size_t val_length = strlen(value);
 
-                    memmove(ptr + val_length, val_tag.after, strlen(val_tag.after) + 1);
+                    memmove(ptr + val_length, val_tag.end_addr, strlen(val_tag.end_addr) + 1);
                     memcpy(ptr, value, val_length);
 
                     ptr += strlen(ptr) + 1;
@@ -1755,26 +1752,26 @@ size_t render_for(char *template, char *block_name, int times, ...) {
 
     BlockLocation block = find_block(template, block_name);
 
-    if (!block.opening_tag.before || !block.opening_tag.after || !block.closing_tag.before || !block.closing_tag.after) {
+    if (!block.opening_tag.start_addr || !block.opening_tag.end_addr || !block.closing_tag.start_addr || !block.closing_tag.end_addr) {
         /** Didn't find block */
         return strlen(template);
     }
 
-    size_t block_length = block.closing_tag.before - block.opening_tag.after;
+    size_t block_length = block.closing_tag.start_addr - block.opening_tag.end_addr;
 
     char *block_copy = (char *)malloc((block_length + 1) * sizeof(char));
-    memcpy(block_copy, block.opening_tag.after, block_length);
+    memcpy(block_copy, block.opening_tag.end_addr, block_length);
     block_copy[block_length] = '\0';
     char *block_copy_end = block_copy + block_length;
 
-    char *start = block.opening_tag.before;
+    char *start = block.opening_tag.start_addr;
     /*
     char *after = block.closing_tag.after;
     */
 
-    size_t after_copy_lenght = strlen(block.closing_tag.after);
+    size_t after_copy_lenght = strlen(block.closing_tag.end_addr);
     char *after_copy = (char *)malloc((after_copy_lenght + 1) * sizeof(char));
-    memcpy(after_copy, block.closing_tag.after, after_copy_lenght);
+    memcpy(after_copy, block.closing_tag.end_addr, after_copy_lenght);
     after_copy[after_copy_lenght] = '\0';
 
     va_start(args, times);
@@ -1811,8 +1808,8 @@ size_t render_for(char *template, char *block_name, int times, ...) {
                     }
 
                     TagLocation val_tag = {0};
-                    val_tag.before = ptr;
-                    val_tag.after = ptr + strlen(VAL_OPENING_TAG__START) + val_name_length + strlen(VAL_SELF_CLOSING_TAG__END) + 1;
+                    val_tag.start_addr = ptr;
+                    val_tag.end_addr = ptr + strlen(VAL_OPENING_TAG__START) + val_name_length + strlen(VAL_SELF_CLOSING_TAG__END) + 1;
 
                     char *value = find_value(val_name, val_name_length, key_value);
 
@@ -1820,7 +1817,7 @@ size_t render_for(char *template, char *block_name, int times, ...) {
                         size_t val_length = strlen(value);
                         memcpy(start, value, val_length);
 
-                        ptr = val_tag.after;
+                        ptr = val_tag.end_addr;
                         start += val_length;
 
                         continue;
@@ -1934,7 +1931,7 @@ void home_get(Arena *scratch_arena_raw) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-    char *template = find_value("home", sizeof("home"), p_global_arena_data->html.component_dict);
+    char *template = find_value("home", sizeof("home"), p_global_arena_data->templates);
 
     char *template_cpy = (char *)scratch_arena_raw->current;
 
@@ -2333,9 +2330,9 @@ String find_http_request_value(const char key[], char *request) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-char *find_value(const char key[], size_t key_length, CharsBlock block) {
-    char *ptr = block.start_addr;
-    while (ptr < block.end_addr) {
+char *find_value(const char key[], size_t key_length, Dict dict) {
+    char *ptr = dict.start_addr;
+    while (ptr < dict.end_addr) {
         if (strncmp(ptr, key, key_length) == 0) {
             ptr += strlen(ptr) + 1;
             return (ptr);
@@ -2374,7 +2371,7 @@ char *load_db_connection_string(const char *filepath) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-CharsBlock load_env_variables(const char *filepath) {
+Dict load_env_variables(const char *filepath) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
@@ -2384,9 +2381,8 @@ CharsBlock load_env_variables(const char *filepath) {
 
     assert(file_size != 0);
 
-    /** Envs will be stored in a dictionary */
     char *envs = (char *)p_global_arena_raw->current;
-    p_global_arena_data->envs.start_addr = p_global_arena_raw->current;
+    p_global_arena_data->envs.start_addr = envs;
 
     char *tmp_envs = envs;
 
@@ -2541,26 +2537,24 @@ CharsBlock load_env_variables(const char *filepath) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-CharsBlock load_public_files(const char *base_path) {
+Dict load_public_files(const char *base_path) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
-    /** Find the paths of all static files (in this case, all file stored in PUBLIC_FOLDER or subfolders) */
+    /** Find the paths of all static(js, css, json, png, etc) files
+     * (in this case, all file stored in PUBLIC_FOLDER or subfolders) */
     char *public_files_paths = (char *)p_global_arena_raw->current;
-    p_global_arena_data->public.paths.start_addr = public_files_paths;
     uint8_t public_files_count = 0;
     size_t all_paths_length = 0;
     locate_files(public_files_paths, base_path, NULL, 0, &public_files_count, &all_paths_length);
-    p_global_arena_data->public.paths.end_addr = public_files_paths + all_paths_length;
-    p_global_arena_raw->current = p_global_arena_data->public.paths.end_addr + 1;
+    char *public_files_paths_end = public_files_paths + all_paths_length;
+    p_global_arena_raw->current = public_files_paths_end + 1;
 
-    /** Load files into memory arena as key(file path) value(file content) dict */
-    char *public_files = (char *)p_global_arena_raw->current;
-    p_global_arena_data->public.file_dict.start_addr = public_files;
-    char *tmp_public_files = public_files;
-    char *tmp_public_files_paths = p_global_arena_data->public.paths.start_addr;
+    char *public_files_dict = (char *)p_global_arena_raw->current;
+    char *tmp_public_files_dict = public_files_dict;
+    char *tmp_public_files_paths = public_files_paths;
     char extension[] = ".html";
-    while (tmp_public_files_paths < p_global_arena_data->public.paths.end_addr) {
+    while (tmp_public_files_paths < public_files_paths_end) {
         /** NOT interested in html files, they will be loaded differently */
         if (strncmp(tmp_public_files_paths + strlen(tmp_public_files_paths) - strlen(extension), extension, strlen(extension)) == 0) {
             tmp_public_files_paths += strlen(tmp_public_files_paths) + 1;
@@ -2572,14 +2566,14 @@ CharsBlock load_public_files(const char *base_path) {
         read_file(&file_content, &file_size, tmp_public_files_paths);
 
         /** File path key */
-        strncpy(tmp_public_files, tmp_public_files_paths, strlen(tmp_public_files_paths) + 1);
-        tmp_public_files[strlen(tmp_public_files_paths)] = '\0';
-        tmp_public_files += strlen(tmp_public_files_paths) + 1;
+        strncpy(tmp_public_files_dict, tmp_public_files_paths, strlen(tmp_public_files_paths) + 1);
+        tmp_public_files_dict[strlen(tmp_public_files_paths)] = '\0';
+        tmp_public_files_dict += strlen(tmp_public_files_paths) + 1;
 
         /** File content value */
-        strncpy(tmp_public_files, file_content, file_size + 1);
-        tmp_public_files[file_size] = '\0';
-        tmp_public_files += file_size + 1;
+        strncpy(tmp_public_files_dict, file_content, file_size + 1);
+        tmp_public_files_dict[file_size] = '\0';
+        tmp_public_files_dict += file_size + 1;
 
         free(file_content);
         file_content = NULL;
@@ -2587,10 +2581,19 @@ CharsBlock load_public_files(const char *base_path) {
         tmp_public_files_paths += strlen(tmp_public_files_paths) + 1;
     }
 
-    p_global_arena_data->public.file_dict.end_addr = tmp_public_files;
-    p_global_arena_raw->current = p_global_arena_data->public.file_dict.end_addr + 1;
+    size_t public_files_dict_length = tmp_public_files_dict - public_files_dict;
 
-    return p_global_arena_data->public.file_dict;
+    /** The memory used for public file paths is no longer needed because the paths
+     * are now stored as keys in `public_files_dict`. To save memory, we overwrite
+     * this space with `public_files_dict`, avoiding waste. */
+    char *start = public_files_paths;
+    memcpy(start, public_files_dict, public_files_dict_length);
+    p_global_arena_data->public_files_dict.start_addr = start;
+    p_global_arena_data->public_files_dict.end_addr = start + public_files_dict_length;
+
+    p_global_arena_raw->current = p_global_arena_data->public_files_dict.end_addr + 1;
+
+    return p_global_arena_data->public_files_dict;
 }
 
 /**
@@ -2686,29 +2689,25 @@ size_t html_minify(char *buffer, char *html, size_t html_length) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-CharsBlock load_html_components(const char *base_path) {
+Dict load_html_components(const char *base_path) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     /** Find the paths of all html files */
     char *html_files_paths = (char *)p_global_arena_raw->current;
-    p_global_arena_data->html.raw.paths.start_addr = html_files_paths;
     char extension[] = ".html";
     uint8_t html_files_count = 0;
     size_t all_paths_length = 0;
     locate_files(html_files_paths, base_path, extension, 0, &html_files_count, &all_paths_length);
-    p_global_arena_data->html.raw.paths.end_addr = html_files_paths + all_paths_length;
-    p_global_arena_raw->current = p_global_arena_data->html.raw.paths.end_addr + 1;
+    char *html_files_paths_end = html_files_paths + all_paths_length;
+    p_global_arena_raw->current = html_files_paths_end + 1;
 
     /* A Component is an HTML snippet that may include references to other HTML snippets, i.e., it is composable */
-    char *components = (char *)p_global_arena_raw->current;
-    p_global_arena_data->html.raw.component_dict.start_addr = components;
-    char *tmp_components = components;
+    char *components_dict = (char *)p_global_arena_raw->current;
+    char *tmp_components_dict = components_dict;
+    char *tmp_filepath = html_files_paths;
 
-    uint8_t components_count = 0;
-
-    char *tmp_filepath = p_global_arena_data->html.raw.paths.start_addr;
-    while (tmp_filepath < p_global_arena_data->html.raw.paths.end_addr) {
+    while (tmp_filepath < html_files_paths_end) {
         char *file_content = NULL;
         long file_size = 0;
         read_file(&file_content, &file_size, tmp_filepath);
@@ -2727,9 +2726,9 @@ CharsBlock load_html_components(const char *base_path) {
 
             if ((component_name_end = strchr(component_name_start, '\"')) != NULL) {
                 component_name_length = component_name_end - component_name_start;
-                strncpy(tmp_components, component_name_start, component_name_length);
-                tmp_components[component_name_length] = '\0';
-                tmp_components += component_name_length + 1;
+                strncpy(tmp_components_dict, component_name_start, component_name_length);
+                tmp_components_dict[component_name_length] = '\0';
+                tmp_components_dict += component_name_length + 1;
             } else {
                 assert(0);
             }
@@ -2748,11 +2747,9 @@ CharsBlock load_html_components(const char *base_path) {
                 ptr++;
             }
 
-            size_t minified_html_length = html_minify(tmp_components, html, html_length);
+            size_t minified_html_length = html_minify(tmp_components_dict, html, html_length);
 
-            tmp_components += minified_html_length;
-
-            components_count++;
+            tmp_components_dict += minified_html_length;
             tmp_file_content++;
         }
 
@@ -2762,52 +2759,73 @@ CharsBlock load_html_components(const char *base_path) {
         tmp_filepath += strlen(tmp_filepath) + 1;
     }
 
-    p_global_arena_data->html.raw.component_dict.end_addr = tmp_components;
-    p_global_arena_raw->current = tmp_components + 1;
+    size_t components_dict_length = tmp_components_dict - components_dict;
 
-    p_global_arena_data->html.raw.count = components_count;
+    /** The memory used for HTML file paths is no longer needed because the paths
+     * are now stored as keys in `components_dict`. To save memory, we overwrite
+     * this space with `components_dict`, avoiding waste. */
+    char *start = html_files_paths;
+    memcpy(start, components_dict, components_dict_length);
+    Dict html_raw_components_dict = {0};
+    html_raw_components_dict.start_addr = start;
+    html_raw_components_dict.end_addr = start + components_dict_length;
 
-    return p_global_arena_data->html.raw.component_dict;
+    p_global_arena_raw->current = html_raw_components_dict.end_addr + 1;
+
+    return html_raw_components_dict;
+}
+
+uint8_t get_dict_size(Dict dict) {
+    size_t size = 0;
+
+    char *ptr = dict.start_addr;
+    while (ptr < dict.end_addr) {
+        ptr += strlen(ptr) + 1; /* Advance past key */
+        ptr += strlen(ptr) + 1; /* Advance past value */
+        size++;
+    }
+
+    return size;
 }
 
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-CharsBlock resolve_html_components_imports() {
+Dict load_templates(const char *base_path) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
+    Dict html_raw_components = load_html_components(base_path);
+
     uint8_t i;
 
-    /* An HTML template is essentially a Component that has been compiled with all its imports. */
-    char *html_templates = (char *)p_global_arena_raw->current;
-    p_global_arena_data->html.component_dict.start_addr = html_templates;
+    /* A template is essentially a Component that has been compiled with all its imports. */
+    char *templates_dict = (char *)p_global_arena_raw->current;
+    char *tmp_templates_dict = templates_dict;
 
-    char *tmp_html_templates = html_templates;
-
-    char *components = p_global_arena_data->html.raw.component_dict.start_addr;
+    char *components = html_raw_components.start_addr;
     char *tmp_components = components;
 
-    uint8_t components_count = p_global_arena_data->html.raw.count;
+    uint8_t components_count = get_dict_size(html_raw_components);
 
     for (i = 0; i < components_count; i++) { /** Compile Components. */
         uint8_t html_template_name_length = (uint8_t)strlen(tmp_components);
-        strncpy(tmp_html_templates, tmp_components, html_template_name_length);
-        tmp_html_templates[html_template_name_length] = '\0';
+        strncpy(tmp_templates_dict, tmp_components, html_template_name_length);
+        tmp_templates_dict[html_template_name_length] = '\0';
 
-        tmp_html_templates += html_template_name_length + 1;
+        tmp_templates_dict += html_template_name_length + 1;
 
         tmp_components += strlen(tmp_components) + 1; /* Advance pointer to component markdown */
 
         size_t component_markdown_length = strlen(tmp_components);
-        strncpy(tmp_html_templates, tmp_components, component_markdown_length);
-        tmp_html_templates[component_markdown_length] = '\0';
+        strncpy(tmp_templates_dict, tmp_components, component_markdown_length);
+        tmp_templates_dict[component_markdown_length] = '\0';
 
-        char *template_start = tmp_html_templates;
+        char *template_start = tmp_templates_dict;
 
-        char *component_import_opening_tag = tmp_html_templates;
+        char *component_import_opening_tag = tmp_templates_dict;
         while ((component_import_opening_tag = strstr(component_import_opening_tag, COMPONENT_IMPORT_OPENING_TAG__START)) != NULL) { /** Resolve Component imports. */
-            tmp_html_templates += (component_import_opening_tag - tmp_html_templates);
+            tmp_templates_dict += (component_import_opening_tag - tmp_templates_dict);
 
             char *import_name_start = component_import_opening_tag + strlen(COMPONENT_IMPORT_OPENING_TAG__START);
             char *tmp_import_name = import_name_start;
@@ -2828,9 +2846,9 @@ CharsBlock resolve_html_components_imports() {
                             uint8_t import_statement_length = (uint8_t)strlen(COMPONENT_IMPORT_OPENING_TAG__START) + imported_name_length + (uint8_t)strlen(OPENING_COMPONENT_IMPORT_TAG_SELF_CLOSING_END);
                             size_t component_markdown_length = strlen(tmp_components_j);
 
-                            size_t len = strlen(tmp_html_templates + import_statement_length);
-                            memmove(tmp_html_templates + component_markdown_length, tmp_html_templates + import_statement_length, len); /* ATTENTION! */
-                            char *ptr = tmp_html_templates + component_markdown_length + len;
+                            size_t len = strlen(tmp_templates_dict + import_statement_length);
+                            memmove(tmp_templates_dict + component_markdown_length, tmp_templates_dict + import_statement_length, len); /* ATTENTION! */
+                            char *ptr = tmp_templates_dict + component_markdown_length + len;
                             ptr[0] = '\0';
                             ptr++;
                             while (*ptr) {
@@ -2839,7 +2857,7 @@ CharsBlock resolve_html_components_imports() {
                                 ptr += str_len + 1;
                             }
 
-                            memcpy(tmp_html_templates, tmp_components_j, component_markdown_length);
+                            memcpy(tmp_templates_dict, tmp_components_j, component_markdown_length);
 
                             break; /** We have successfully found the component related to
                                     * the import and incorporated it into the template. */
@@ -2859,7 +2877,7 @@ CharsBlock resolve_html_components_imports() {
                      * The component we imported may contain additional imports. Reset the pointer to
                      * the start of the HTML template to check for imports from the beginning again.
                      */
-                    tmp_html_templates = template_start;
+                    tmp_templates_dict = template_start;
 
                     break;
                 }
@@ -2874,7 +2892,7 @@ CharsBlock resolve_html_components_imports() {
                         if (strncmp(tmp_components_j, import_name_start, imported_name_length) == 0) {
                             tmp_components_j += strlen(tmp_components_j) + 1; /* Advance pointer to component markdown */
 
-                            resolve_slots(tmp_components_j, component_import_opening_tag, &tmp_html_templates);
+                            resolve_slots(tmp_components_j, component_import_opening_tag, &tmp_templates_dict);
 
                             break; /** We have successfully found the component related to
                                     * the import and incorporated it into the template. */
@@ -2897,13 +2915,22 @@ CharsBlock resolve_html_components_imports() {
         }
 
         tmp_components += strlen(tmp_components) + 1; /* Advance pointer to component name */
-        tmp_html_templates += strlen(tmp_html_templates) + 1;
+        tmp_templates_dict += strlen(tmp_templates_dict) + 1;
     }
 
-    p_global_arena_raw->current = tmp_html_templates;
-    p_global_arena_data->html.component_dict.end_addr = (char *)p_global_arena_raw->current - 1;
+    size_t templates_dict_length = tmp_templates_dict - templates_dict;
 
-    return p_global_arena_data->html.component_dict;
+    /** The memory allocated for raw HTML components is no longer needed, as they have
+     * been compiled and stored in the `templates_dict`. To optimize memory usage,
+     * we overwrite this space with `templates_dict`, preventing wastage. */
+    char *start = html_raw_components.start_addr;
+    memcpy(start, templates_dict, templates_dict_length);
+    p_global_arena_data->templates.start_addr = start;
+    p_global_arena_data->templates.end_addr = start + templates_dict_length;
+
+    p_global_arena_raw->current = p_global_arena_data->templates.end_addr + 1;
+
+    return p_global_arena_data->templates;
 }
 
 /**
