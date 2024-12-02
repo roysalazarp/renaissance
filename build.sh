@@ -42,8 +42,6 @@ elif [ "$BUILD_ENV" == "dev" ]; then
         -Werror \
         -pedantic \
         -Wno-declaration-after-statement \
-        -Wno-unused-variable \
-        -Wno-unused-parameter \
         -o "$BUILD_DIR/app" \
         main.c \
         -I/usr/include/postgresql \

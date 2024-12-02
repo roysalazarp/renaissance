@@ -1,0 +1,22 @@
+<x-component-def name="test">
+    <div>
+        <x-val name="page_name" />
+    </div>
+    <div>
+        <x-for name="table">
+            <td>
+                <x-val name="name" />
+            </td>
+            <p>
+                <x-val name="sub_name" />
+            </p>
+            <x-for name="rows">
+                <div>
+                    <x-for name="cells">
+                        <x-val name="." />
+                    </x-for>
+                </div>
+            </x-for>
+        </x-for>
+    </div>
+</x-component-def>

@@ -182,7 +182,8 @@ Dict load_html_components(const char *base_path);
 Dict load_templates(const char *base_path);
 void resolve_slots(char *component_markdown, char *import_statement, char **templates);
 BlockLocation find_block(char *template, char *block_name);
-size_t render_val(char *template, char *value_name, char *value);
+size_t _render_val(char *template, char *val_name, char *value);
+#define render_val(template, val_name, value) _render_val((template), (val_name "\""), (value))
 size_t render_for(char *template, char *scope, int times, ...);
 size_t replace_val(char *template, char *value_name, char *value);
 size_t html_minify(char *buffer, char *html, size_t html_length);
@@ -198,7 +199,7 @@ void print_query_result(PGresult *query_result);
 void router(Arena *scratch_arena_raw);
 void public_get(Arena *scratch_arena_raw, String url);
 void view_get(Arena *scratch_arena_raw, char *view, Dict replaces);
-void home_get(Arena *scratch_arena_raw);
+void test_get(Arena *scratch_arena_raw);
 void auth_validate_email_post(Arena *scratch_arena_raw);
 void register_create_account_post(Arena *scratch_arena_raw);
 void login_create_session_post(Arena *scratch_arena_raw);
@@ -293,10 +294,10 @@ int main() {
     Dict envs = load_env_variables(ENV_FILE_PATH);
 
     const char *public_base_path = find_value("COMPILE_PUBLIC_FOLDER", sizeof("COMPILE_PUBLIC_FOLDER"), envs);
-    Dict public_files = load_public_files(public_base_path);
+    load_public_files(public_base_path);
 
     const char *html_base_path = find_value("COMPILE_TEMPLATES_FOLDER", sizeof("COMPILE_TEMPLATES_FOLDER"), envs);
-    Dict templates = load_templates(html_base_path); /** TODO: Review the code inside this function */
+    load_templates(html_base_path); /** TODO: Review the code inside this function */
 
     epoll_fd = epoll_create1(0);
     assert(epoll_fd != -1);
@@ -607,7 +608,6 @@ void router(Arena *scratch_arena_raw) {
 
     if (strncmp(url.start_addr, URL("/"), strlen(URL("/"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-
             String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request);
             Dict replacements = {0};
 
@@ -617,11 +617,13 @@ void router(Arena *scratch_arena_raw) {
 
             view_get(scratch_arena_raw, "home", replacements);
             return;
+        }
+    }
 
-            /*
-            home_get(scratch_arena_raw);
+    if (strncmp(url.start_addr, URL("/test"), strlen(URL("/test"))) == 0) {
+        if (strncmp(method.start_addr, "GET", method.length) == 0) {
+            test_get(scratch_arena_raw);
             return;
-            */
         }
     }
 
@@ -1028,7 +1030,6 @@ void view_get(Arena *scratch_arena_raw, char *view, Dict replaces) {
  *       `client` is updated with the request context and socket data.
  */
 DBConnection *get_connection(Arena *scratch_arena_raw) {
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     int i;
@@ -1066,7 +1067,6 @@ DBConnection *get_connection(Arena *scratch_arena_raw) {
 QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
     int i;
 
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     for (i = 0; i < MAX_CLIENT_CONNECTIONS; i++) {
@@ -1091,8 +1091,9 @@ QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
  * TODO: ADD FUNCTION DOCUMENTATION
  */
 void login_create_session_post(Arena *scratch_arena_raw) {
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+    printf("%lu\n", scratch_arena_raw->size);
+
+    return;
 }
 
 int generate_salt(uint8_t *salt, size_t salt_size) {
@@ -1201,7 +1202,6 @@ int validate_email(char *error_message_buffer, const char *email) {
  * TODO: ADD FUNCTION DOCUMENTATION
  */
 void register_create_account_post(Arena *scratch_arena_raw) {
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     DBConnection *connection = get_connection(scratch_arena_raw);
@@ -1317,8 +1317,6 @@ void register_create_account_post(Arena *scratch_arena_raw) {
     connection = &(connection_pool[index]);
 
     PGresult *result = get_result(connection);
-
-    int rows = PQntuples(result);
     print_query_result(result);
     PQclear(result);
 
@@ -1386,7 +1384,6 @@ PGresult *get_result(DBConnection *connection) {
  * TODO: ADD FUNCTION DOCUMENTATION
  */
 void auth_validate_email_post(Arena *scratch_arena_raw) {
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     DBConnection *connection = get_connection(scratch_arena_raw);
@@ -1471,7 +1468,6 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
         sprintf((char *)response_headers, "HTTP/1.1 200 OK\r\nHX-Redirect: /register?email=%.*s\r\n\r\n", (int)encoded_email.length, encoded_email.start_addr);
     }
 
-    int client_socket = scratch_arena_data->client_socket;
     SSL *ssl = scratch_arena_data->ssl;
 
     if (SSL_write(ssl, response_headers, strlen((char *)response_headers)) == -1) {
@@ -1685,7 +1681,7 @@ size_t replace_val(char *template, char *val_name, char *value) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-size_t render_val(char *template, char *val_name, char *value) {
+size_t _render_val(char *template, char *val_name, char *value) {
     char *ptr = template;
     uint8_t inside = 0;
     while (*ptr != '\0') {
@@ -1703,21 +1699,21 @@ size_t render_val(char *template, char *val_name, char *value) {
 
         if (strncmp(ptr, VAL_OPENING_TAG__START, strlen(VAL_OPENING_TAG__START)) == 0) {
             if (inside == 0) {
-                size_t val_name_length = 0;
-                char *val_name = ptr + strlen(VAL_OPENING_TAG__START);
-                char *tmp = val_name;
+                size_t value_name_length = 0;
+                char *value_name = ptr + strlen(VAL_OPENING_TAG__START);
+                char *tmp = value_name;
                 tmp++;
 
                 while (*tmp != '"') {
-                    val_name_length++;
+                    value_name_length++;
                     tmp++;
                 }
 
                 TagLocation val_tag = {0};
                 val_tag.start_addr = ptr;
-                val_tag.end_addr = ptr + strlen(VAL_OPENING_TAG__START) + val_name_length + strlen(VAL_SELF_CLOSING_TAG__END) + 1;
+                val_tag.end_addr = ptr + strlen(VAL_OPENING_TAG__START) + value_name_length + strlen(VAL_SELF_CLOSING_TAG__END) + 1;
 
-                if (value) {
+                if (strncmp(val_name, value_name, strlen(val_name)) == 0) {
                     size_t val_length = strlen(value);
 
                     memmove(ptr + val_length, val_tag.end_addr, strlen(val_tag.end_addr) + 1);
@@ -1856,7 +1852,7 @@ size_t render_for(char *template, char *block_name, int times, ...) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-void home_get(Arena *scratch_arena_raw) {
+void test_get(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     DBConnection *connection = get_connection(scratch_arena_raw);
@@ -1926,14 +1922,13 @@ void home_get(Arena *scratch_arena_raw) {
     connection = &(connection_pool[index]);
     PGresult *result = get_result(connection);
 
-    int rows = PQntuples(result);
     print_query_result(result);
     PQclear(result);
 
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-    char *template = find_value("home", sizeof("home"), p_global_arena_data->templates);
+    char *template = find_value("test", sizeof("test"), p_global_arena_data->templates);
 
     char *template_cpy = (char *)scratch_arena_raw->current;
 
@@ -2352,7 +2347,6 @@ char *find_value(const char key[], size_t key_length, Dict dict) {
  */
 Dict load_env_variables(const char *filepath) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     char *file_content = NULL;
     long file_size = 0;
@@ -2670,7 +2664,6 @@ size_t html_minify(char *buffer, char *html, size_t html_length) {
  */
 Dict load_html_components(const char *base_path) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     /** Find the paths of all html files */
     char *html_files_paths = (char *)p_global_arena_raw->current;
@@ -2951,9 +2944,6 @@ Socket *create_server_socket(uint16_t port) {
  * TODO: ADD FUNCTION DOCUMENTATION
  */
 void create_connection_pool(Dict envs) {
-    Arena *p_global_arena_raw = _p_global_arena_raw;
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
-
     uint8_t i;
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
         char *database = find_value("DB_NAME", sizeof("DB_NAME"), envs);
