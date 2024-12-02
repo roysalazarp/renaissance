@@ -43,7 +43,7 @@
 
 #define MAX_PATH_LENGTH 300
 #define MAX_FILES 20
-#define MAX_CONNECTIONS 100 /** ?? */
+#define MAX_CLIENT_CONNECTIONS 100 /** ?? */
 #define CONNECTION_POOL_SIZE 5
 
 #define KB(value) ((value) * 1024)
@@ -127,7 +127,6 @@ typedef struct {
 
 typedef struct {
     char *db_connection_string;
-    Dict envs; /** Should I keep this in the memory ??? */
     Socket *socket;
     Dict public_files_dict;
     Dict templates;
@@ -189,8 +188,7 @@ size_t replace_val(char *template, char *value_name, char *value);
 size_t html_minify(char *buffer, char *html, size_t html_length);
 
 /** Connection */
-char *load_db_connection_string(const char *filepath);
-void create_connection_pool();
+void create_connection_pool(Dict envs);
 DBConnection *get_connection(Arena *scratch_arena_raw);
 QueuedRequest *put_in_queue(Arena *scratch_arena_raw);
 PGresult *get_result(DBConnection *connection);
@@ -270,7 +268,7 @@ struct epoll_event event;
 #define from_index(i) (i - 1)
 
 DBConnection connection_pool[CONNECTION_POOL_SIZE];
-QueuedRequest queue[MAX_CONNECTIONS];
+QueuedRequest queue[MAX_CLIENT_CONNECTIONS];
 
 jmp_buf ctx;
 jmp_buf db_ctx;
@@ -336,7 +334,10 @@ int main() {
 
     printf("Server listening on port: %d...\n", (int)port);
 
-    create_connection_pool();
+    create_connection_pool(envs);
+
+    /** Clear envs for security */
+    memset(envs.start_addr, 0, envs.end_addr - envs.start_addr);
 
     struct sockaddr_in client_addr; /** Why is this needed ?? */
     socklen_t client_addr_len = sizeof(client_addr);
@@ -432,7 +433,7 @@ int main() {
                         QueuedRequest *request = NULL;
 
                         int j;
-                        for (j = 0; j < MAX_CONNECTIONS; j++) {
+                        for (j = 0; j < MAX_CLIENT_CONNECTIONS; j++) {
                             if (queue[j].client.fd != 0) {
                                 /** First client request in the queue waiting for connection */
                                 request = &(queue[j]);
@@ -1068,7 +1069,7 @@ QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
-    for (i = 0; i < MAX_CONNECTIONS; i++) {
+    for (i = 0; i < MAX_CLIENT_CONNECTIONS; i++) {
         if (queue[i].client.fd == 0) {
             /* Available spot in the queue */
 
@@ -1563,8 +1564,6 @@ void public_get(Arena *scratch_arena_raw, String url) {
     int client_socket = scratch_arena_data->client_socket;
     SSL *ssl = scratch_arena_data->ssl;
 
-    const char *base_path = find_value("COMPILE_PUBLIC_FOLDER", sizeof("COMPILE_PUBLIC_FOLDER"), p_global_arena_data->envs);
-
     char *path = (char *)arena_alloc(scratch_arena_raw, sizeof('.') + url.length);
     char *tmp_path = path;
     *tmp_path = '.';
@@ -1838,6 +1837,9 @@ size_t render_for(char *template, char *block_name, int times, ...) {
 
     memcpy(start, after_copy, after_copy_lenght);
     start[after_copy_lenght] = '\0';
+
+    free(block_copy);
+    free(after_copy);
 
     /** Clean up memory */
     char *p = start + after_copy_lenght + 1;
@@ -2348,29 +2350,6 @@ char *find_value(const char key[], size_t key_length, Dict dict) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-char *load_db_connection_string(const char *filepath) {
-    Arena *p_global_arena_raw = _p_global_arena_raw;
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
-
-    char *file_content = NULL;
-    long file_size = 0;
-    read_file(&file_content, &file_size, filepath);
-
-    char *connection_string = (char *)arena_alloc(p_global_arena_raw, (size_t)file_size + 1);
-    memcpy(connection_string, file_content, (size_t)file_size);
-    connection_string[file_size] = '\0';
-
-    p_global_arena_data->db_connection_string = connection_string;
-
-    free(file_content);
-    file_content = NULL;
-
-    return connection_string;
-}
-
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 Dict load_env_variables(const char *filepath) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -2382,8 +2361,6 @@ Dict load_env_variables(const char *filepath) {
     assert(file_size != 0);
 
     char *envs = (char *)p_global_arena_raw->current;
-    p_global_arena_data->envs.start_addr = envs;
-
     char *tmp_envs = envs;
 
     char *line = file_content;
@@ -2525,13 +2502,15 @@ Dict load_env_variables(const char *filepath) {
         processed_value = 0;
     }
 
-    p_global_arena_data->envs.end_addr = tmp_envs;
-    p_global_arena_raw->current = tmp_envs + 1;
+    Dict envs_dict = {0};
+    envs_dict.start_addr = envs;
+    envs_dict.end_addr = tmp_envs;
+    p_global_arena_raw->current = envs_dict.end_addr + 1;
 
     free(file_content);
     file_content = NULL;
 
-    return p_global_arena_data->envs;
+    return envs_dict;
 }
 
 /**
@@ -2957,7 +2936,7 @@ Socket *create_server_socket(uint16_t port) {
 
     assert(bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) != -1);
 
-    assert(listen(server_fd, MAX_CONNECTIONS) != -1);
+    assert(listen(server_fd, MAX_CLIENT_CONNECTIONS) != -1);
 
     Socket *server_socket = arena_alloc(p_global_arena_raw, sizeof(Socket));
     server_socket->fd = server_fd;
@@ -2971,16 +2950,16 @@ Socket *create_server_socket(uint16_t port) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-void create_connection_pool() {
+void create_connection_pool(Dict envs) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     uint8_t i;
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
-        char *database = find_value("DB_NAME", sizeof("DB_NAME"), p_global_arena_data->envs);
-        char *user = find_value("DB_USER", sizeof("DB_USER"), p_global_arena_data->envs);
-        char *password = find_value("PASSWORD", sizeof("PASSWORD"), p_global_arena_data->envs);
-        char *host = find_value("HOST", sizeof("HOST"), p_global_arena_data->envs);
+        char *database = find_value("DB_NAME", sizeof("DB_NAME"), envs);
+        char *user = find_value("DB_USER", sizeof("DB_USER"), envs);
+        char *password = find_value("PASSWORD", sizeof("PASSWORD"), envs);
+        char *host = find_value("HOST", sizeof("HOST"), envs);
 
         const char *keys[] = {"dbname", "user", "password", "host", NULL};
         const char *values[5];

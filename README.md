@@ -8,29 +8,33 @@
     <h2>⇁ TOC</h2>
 </div>
 
-- [⇁ The Problem](#-the-problem)
-- [⇁ The Solution](#-the-solution)
-- [⇁ Installation](#-installation)
-  - [Github codespaces](#github-codespaces)
-  - [Local setup](#local-setup)
-- [⇁ Running the project](#-running-the-project)
-  - [VS Code](#vs-code)
-  - [Valgrind](#valgrind)
-  - [Executable binary](#executable-binary)
-- [⇁ Code style](#-code-style)
-- [⇁ Features](#-features)
-- [⇁ Feedback](#-feedback)
-- [⇁ Contribution](#-contribution)
-- [⇁ Social](#-social)
-- [⇁ Acknowledgements](#-acknowledgements)
+-   [⇁ The Problem](#-the-problem)
+-   [⇁ The Solution](#-the-solution)
+-   [⇁ Installation](#-installation)
+    -   [Github codespaces](#github-codespaces)
+    -   [Local setup](#local-setup)
+-   [⇁ Running the project](#-running-the-project)
+    -   [VS Code](#vs-code)
+    -   [Valgrind](#valgrind)
+    -   [Executable binary](#executable-binary)
+-   [⇁ Code style](#-code-style)
+-   [⇁ Features](#-features)
+-   [⇁ Feedback](#-feedback)
+-   [⇁ Contribution](#-contribution)
+-   [⇁ Social](#-social)
+-   [⇁ Acknowledgements](#-acknowledgements)
 
 ## ⇁ The Problem
 
-It turns out that piling code on top of code doesn't work for creating simple, reliable, secure, and performant applications.
+In modern software development, it is commonly believed that higher levels of abstraction—such as using Node.js over C++ or C++ over C—and reliance on third-party libraries are essential for building secure software, accelerating development, and ensuring scalability. However, these abstractions and libraries are often designed to cover a wide range of use cases. As the number of use cases grows, so does the complexity of the codebase, which can actually increase the potential for security vulnerabilities. Additionally, this complexity disempowers library/framework users, preventing them from adapting the library to their specific use cases and often forcing them to "fight" the library to make it do what they need.
+
+In essence, today's software is often bloated with thousands of lines of unnecessary code from large third-party libraries and executes large amounts of redundant code due to high levels of abstraction.
+
+This has led to a situation where even small or newly developed programs depend on vast amounts of code to function properly, often just to handle relatively simple business tasks—such as CRUD operations for a web backend.
 
 ## ⇁ The Solution
 
-Remove the millions of lines of code that "make your life easier" and instead give the hardware only the necessary instructions to perform the task at hand.
+Bundle your program with the fewest possible instructions to enable the hardware to perform the task at hand.
 
 ## ⇁ Installation
 
