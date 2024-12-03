@@ -91,6 +91,10 @@
 +-----------------------------------------------------------------------------------+
 */
 
+typedef int boolean;
+#define true 1
+#define false 0
+
 typedef enum { SERVER_SOCKET, CLIENT_SOCKET, DB_SOCKET } FDType;
 
 typedef struct {
@@ -163,15 +167,18 @@ typedef struct {
 */
 
 /** Server setup */
+
 Socket *create_server_socket(uint16_t port);
 
 /** Arena */
+
 Arena *arena_init(size_t size);
 void *arena_alloc(Arena *arena, size_t size);
 void arena_free(Arena *arena);
 void arena_reset(Arena *arena, size_t arena_header_size);
 
 /** Template engine */
+
 Dict load_public_files(const char *base_path);
 Dict load_html_components(const char *base_path);
 Dict load_templates(const char *base_path);
@@ -183,6 +190,7 @@ size_t replace_val(char *template, char *value_name, char *value);
 size_t html_minify(char *buffer, char *html, size_t html_length);
 
 /** Connection */
+
 void create_connection_pool(Dict envs);
 DBConnection *get_connection(Arena *scratch_arena_raw);
 QueuedRequest *put_in_queue(Arena *scratch_arena_raw);
@@ -190,9 +198,10 @@ PGresult *get_result(DBConnection *connection);
 void print_query_result(PGresult *query_result);
 
 /** Request handlers */
+
 void router(Arena *scratch_arena_raw);
 void public_get(Arena *scratch_arena_raw, String url);
-void view_get(Arena *scratch_arena_raw, char *view, Dict replaces);
+void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params);
 void test_get(Arena *scratch_arena_raw);
 void auth_validate_email_post(Arena *scratch_arena_raw);
 void register_create_account_post(Arena *scratch_arena_raw);
@@ -201,6 +210,7 @@ void not_found(int client_socket);
 void release_resources_and_exit(Arena *scratch_arena_raw, DBConnection *connection);
 
 /** Request utils */
+
 String find_http_request_value(const char key[], char *request);
 String find_body(const char *request);
 String find_body_value(const char key[], String body);
@@ -212,6 +222,7 @@ size_t url_decode_utf8(char **string, size_t length);
 Dict parse_and_decode_params(Arena *scratch_arena_raw, String raw_query_params);
 
 /** Utils */
+
 Dict load_env_variables(const char *filepath);
 void read_file(char **buffer, long *file_size, const char *absolute_file_path);
 char *locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
@@ -461,9 +472,6 @@ int main() {
     return 0;
 }
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 void router(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
@@ -593,16 +601,13 @@ void router(Arena *scratch_arena_raw) {
 
     if (strncmp(url.start_addr, URL("/"), strlen(URL("/"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            Dict replacements = {0};
-
-            view_get(scratch_arena_raw, "home", replacements);
+            view_get(scratch_arena_raw, "home", false);
             return;
         }
     }
 
     if (strncmp(url.start_addr, URL("/test"), strlen(URL("/test"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-
             test_get(scratch_arena_raw);
             return;
         }
@@ -610,21 +615,13 @@ void router(Arena *scratch_arena_raw) {
 
     if (strncmp(url.start_addr, URL("/login"), strlen(URL("/login"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/login"), strlen(URL_WITH_QUERY("/login"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request);
-            Dict replacements = {0};
-
-            if (query_params.length > 0) {
-                replacements = parse_and_decode_params(scratch_arena_raw, query_params);
-            }
-
-            view_get(scratch_arena_raw, "login", replacements);
+            view_get(scratch_arena_raw, "login", true);
             return;
         }
     }
 
     if (strncmp(url.start_addr, URL("/login/create-session"), strlen(URL("/login/create-session"))) == 0) {
         if (strncmp(method.start_addr, "POST", method.length) == 0) {
-
             login_create_session_post(scratch_arena_raw);
             return;
         }
@@ -632,21 +629,13 @@ void router(Arena *scratch_arena_raw) {
 
     if (strncmp(url.start_addr, URL("/register"), strlen(URL("/register"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/register"), strlen(URL_WITH_QUERY("/register"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request);
-            Dict replacements = {0};
-
-            if (query_params.length > 0) {
-                replacements = parse_and_decode_params(scratch_arena_raw, query_params);
-            }
-
-            view_get(scratch_arena_raw, "register", replacements);
+            view_get(scratch_arena_raw, "register", true);
             return;
         }
     }
 
     if (strncmp(url.start_addr, URL("/register/create-account"), strlen(URL("/register/create-account"))) == 0) {
         if (strncmp(method.start_addr, "POST", method.length) == 0) {
-
             register_create_account_post(scratch_arena_raw);
             return;
         }
@@ -654,14 +643,7 @@ void router(Arena *scratch_arena_raw) {
 
     if (strncmp(url.start_addr, URL("/auth"), strlen(URL("/auth"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/auth"), strlen(URL_WITH_QUERY("/auth"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request);
-
-            Dict replacements = {0};
-            if (query_params.length > 0) {
-                replacements = parse_and_decode_params(scratch_arena_raw, query_params);
-            }
-
-            view_get(scratch_arena_raw, "auth", replacements);
+            view_get(scratch_arena_raw, "auth", true);
             return;
         }
     }
@@ -679,22 +661,7 @@ void router(Arena *scratch_arena_raw) {
 }
 
 /**
- * @brief Parses and decodes URL query or request body parameters into a dictionary
- * stored in a scratch arena.
- *
- * This function processes a raw parameter string, extracts key-value pairs,
- * decodes UTF-8 encoded values, and stores the results in memory allocated from a
- * scratch arena. The parsed data is returned as a `Dict` object, which contains
- * the start and end addresses of the key-value data.
- *
- * @param scratch_arena_raw Pointer to an `Arena` structure for memory allocation.
- *        The parsed key-value data is stored here.
- * @param raw_params `String` containing request body parameters or raw query parameters
- *        beginning with '?'(e.g., `?key1=value1&key2=value2`).
- *
- * @return `Dict` containing the parsed data. May return an empty `Dict`.
- *
- * @note UTF-8 decoding of values is performed in place during parsing.
+ * Parses and decodes URL query or request body parameters into a dictionary.
  */
 Dict parse_and_decode_params(Arena *scratch_arena_raw, String raw_params) {
     Dict key_value = {0};
@@ -727,7 +694,7 @@ Dict parse_and_decode_params(Arena *scratch_arena_raw, String raw_params) {
         *params_dict = '\0';
         params_dict++;
 
-        /** NOTE: Is it possible that query param does not have a value? */
+        /** TODO: Check if it is possible that query param does not have a value? 🤔 */
 
         char *val = key_end + 1; /** +1 to skip '=' */
         char *val_end = val;
@@ -752,9 +719,6 @@ Dict parse_and_decode_params(Arena *scratch_arena_raw, String raw_params) {
     return key_value;
 }
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 void resolve_slots(char *component_markdown, char *import_statement, char **templates) {
     char *ptr;
 
@@ -863,14 +827,9 @@ void resolve_slots(char *component_markdown, char *import_statement, char **temp
 }
 
 /**
- * @brief Finds the start of the body in an HTTP request.
- *
  * Scans the `request` for the `\r\n\r\n` sequence that separates headers from the body
- * and returns a pointer to the body start.
- *
- * @param request A `String` representing the HTTP request with start and end pointers.
- *
- * @return Pointer to the start of the body or NULL if no body is found.
+ * and returns a pointer to the body start. Return Pointer to the start of the body or
+ * NULL if no body is found.
  */
 String find_body(const char *request) {
     String body = {0};
@@ -896,15 +855,8 @@ String find_body(const char *request) {
 }
 
 /**
- * @brief Finds the value associated with a given key in a request body.
- *
- * Searches the `body` for the specified `key` and returns its corresponding value as a `String`.
- *
- * @param key The key to search for (null-terminated string).
- * @param body A `String` representing the request body (e.g., `key1=value1&key2=value2`).
- *
- * @return `String` containing the value associated with the key.
- *         If the key is not found, returns an empty `String`.
+ * Searches the `body` for the specified `key` and returns its
+ * corresponding value as a `String`.
  */
 String find_body_value(const char key[], String body) {
     /** TODO: Check whether key can have no value */
@@ -942,17 +894,20 @@ String find_body_value(const char key[], String body) {
 }
 
 /**
- * @brief Handles requests for pages that do not require authentication.
- *
- * This function serves as a generic handler for unauthenticated pages such as login or
- * registration. The `replaces` parameter is a dictionary containing values from the URL
- * query parameters passed in the request. For example, a request to `/example?foo=bar`
- * would render the example page template, substituting `bar` into the corresponding
- * placeholders within the template.
+ * Generic handler for pages (e.g., login, registration) that do not require
+ * authentication. when `accepts_query_params` is true, query values are
+ * rendered in their respective template placeholders.
  */
-void view_get(Arena *scratch_arena_raw, char *view, Dict replaces) {
+void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+
+    String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request);
+
+    Dict replaces = {0};
+    if (query_params.length > 0 && accepts_query_params) {
+        replaces = parse_and_decode_params(scratch_arena_raw, query_params);
+    }
 
     int client_socket = scratch_arena_data->client_socket;
     SSL *ssl = scratch_arena_data->ssl;
@@ -998,18 +953,8 @@ void view_get(Arena *scratch_arena_raw, char *view, Dict replaces) {
 }
 
 /**
- * @brief Retrieves an available database connection from the connection pool.
- *
- * Searches the connection pool for an unused connection and assigns the current request,
- * represented by `scratch_arena_raw`, to the found connection.
- *
- * @param scratch_arena_raw Pointer to an `Arena` representing the current request.
- *        Used to associate the request with the connection.
- *
- * @return `DBConnection *` pointing to the available connection. Returns `NULL` if the pool is full.
- *
- * @note A connection is considered available if its `client.fd` is 0. The connection's
- *       `client` is updated with the request context and socket data.
+ * Searches the connection pool for an available connection (where `client.fd` is 0) and assigns
+ * the current request (represented by `scratch_arena_raw`) to it; returns `NULL` if the pool is full.
  */
 DBConnection *get_connection(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
@@ -1032,18 +977,9 @@ DBConnection *get_connection(Arena *scratch_arena_raw) {
 }
 
 /**
- * @brief Adds a request to the queue by associating it with an available queue slot.
- *
- * Searches the request queue for an empty slot and assigns the current request,
- * represented by `scratch_arena_raw`, to the slot. Marks the request as queued.
- *
- * @param scratch_arena_raw Pointer to an `Arena` representing the current request.
- *        Used to associate the request with the queue slot.
- *
- * @return `QueuedRequest *` pointing to the queue slot assigned to the request.
- *
- * @note A queue slot is considered available if its `client.fd` is 0. The slot's `client`
- *       is updated with the request context and marked as queued.
+ * Searches the request queue for an available slot (where `client.fd` is 0) and associates the
+ * current request (represented by `scratch_arena_raw`) with it, marking the request as queued;
+ * returns a pointer to the assigned queue slot.
  */
 QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
     int i;
@@ -1067,9 +1003,6 @@ QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
     assert(0);
 }
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 void login_create_session_post(Arena *scratch_arena_raw) {
     printf("%lu\n", scratch_arena_raw->size);
 
@@ -1178,9 +1111,6 @@ int validate_email(char *error_message_buffer, const char *email) {
     return 0;
 }
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 void register_create_account_post(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
@@ -1315,19 +1245,10 @@ void register_create_account_post(Arena *scratch_arena_raw) {
 }
 
 /**
- * @brief Retrieves the result of an asynchronous PostgreSQL query.
- *
  * Encapsulates boilerplate logic for processing query results in an asynchronous
  * PostgreSQL connection. Ensures all input is consumed, waits for the query to finish,
- * and retrieves the first valid result from the connection.
- *
- * @param connection Pointer to a `DBConnection` representing the PostgreSQL connection.
- *
- * @return Pointer to a `PGresult` structure containing the query result. If the query fails,
- *         logs the error and cleans up any invalid results. Returns the first valid result
- *         if multiple are available.
- *
- * @warning The returned `PGresult` must be cleared with `PQclear` after use to avoid memory leaks.
+ * and retrieves the first valid result from the connection. The returned `PGresult`
+ * must be cleared with `PQclear` after use to avoid memory leaks.
  */
 PGresult *get_result(DBConnection *connection) {
     if (!PQconsumeInput(connection->conn)) {
@@ -1360,9 +1281,6 @@ PGresult *get_result(DBConnection *connection) {
     return result;
 }
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 void auth_validate_email_post(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
@@ -1477,16 +1395,8 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
 }
 
 /**
- * @brief Determines the content type for a given file path based on its extension.
- *
- * This function checks the file path's extension and returns the corresponding content type.
+ * Checks the file path's extension and returns the corresponding content type.
  * For a list of supported extensions, refer to the function implementation.
- *
- * @param scratch_arena_raw Pointer to an `Arena` used for memory allocation.
- * @param path The file path (null-terminated string) for which to determine the content type.
- *
- * @return A pointer to a string containing the appropriate content type. The returned string
- * is allocated from the arena.
  */
 char *file_content_type(Arena *scratch_arena_raw, const char *path) {
     const char *path_end = path + strlen(path);
@@ -2129,7 +2039,8 @@ char hex_to_char(unsigned char c) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * Recursively searches a directory and its subdirectories to locate files with a specified
+ * `extension`. If no `extension` is provided, it retrieves all files regardless of their type.
  */
 char *locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_files, size_t *all_paths_length) {
     DIR *dir = opendir(base_path);
@@ -2166,7 +2077,7 @@ char *locate_files(char *buffer, const char *base_path, const char *extension, u
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * Reads a file into a dynamically allocated buffer; caller must free the buffer.
  */
 void read_file(char **buffer, long *file_size, const char *absolute_file_path) {
     FILE *file = fopen(absolute_file_path, "r");
@@ -2500,9 +2411,6 @@ Dict load_env_variables(const char *filepath) {
     return envs_dict;
 }
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 Dict load_public_files(const char *base_path) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -2521,7 +2429,7 @@ Dict load_public_files(const char *base_path) {
     char *tmp_public_files_paths = public_files_paths;
     char extension[] = ".html";
     while (tmp_public_files_paths < public_files_paths_end) {
-        /** NOT interested in html files, they will be loaded differently */
+        /** NOT interested in html files */
         if (strncmp(tmp_public_files_paths + strlen(tmp_public_files_paths) - strlen(extension), extension, strlen(extension)) == 0) {
             tmp_public_files_paths += strlen(tmp_public_files_paths) + 1;
             continue;
@@ -2549,9 +2457,8 @@ Dict load_public_files(const char *base_path) {
 
     size_t public_files_dict_length = tmp_public_files_dict - public_files_dict;
 
-    /** The memory used for public file paths is no longer needed because the paths
-     * are now stored as keys in `public_files_dict`. To save memory, we overwrite
-     * this space with `public_files_dict`, avoiding waste. */
+    /** `public_files_paths` is no longer needed since file paths are now stored as keys in
+     * `public_files_dict`. Shift `public_files_dict` to occupy its memory space to prevent waste. */
     char *start = public_files_paths;
     memcpy(start, public_files_dict, public_files_dict_length);
     p_global_arena_data->public_files_dict.start_addr = start;
@@ -2563,7 +2470,8 @@ Dict load_public_files(const char *base_path) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * A simple HTML minifier that compresses the given HTML content and stores the
+ * minified result in the provided buffer. It returns the size of the minified HTML.
  */
 size_t html_minify(char *buffer, char *html, size_t html_length) {
     char *start = buffer;
@@ -2652,9 +2560,6 @@ size_t html_minify(char *buffer, char *html, size_t html_length) {
     return length;
 }
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 Dict load_html_components(const char *base_path) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
 
@@ -2677,10 +2582,7 @@ Dict load_html_components(const char *base_path) {
         long file_size = 0;
         read_file(&file_content, &file_size, tmp_filepath);
 
-        /**
-         * A .html file may contain multiple Components and they are
-         * loaded into memory as key(component name) value(component html)
-         */
+        /** A .html file may contain multiple Components */
         char *tmp_file_content = file_content;
         while ((tmp_file_content = strstr(tmp_file_content, COMPONENT_DEFINITION_OPENING_TAG__START)) != NULL) { /** Process Components inside .html file. */
             /** Start processing key (component name) */
@@ -2726,9 +2628,8 @@ Dict load_html_components(const char *base_path) {
 
     size_t components_dict_length = tmp_components_dict - components_dict;
 
-    /** The memory used for HTML file paths is no longer needed because the paths
-     * are now stored as keys in `components_dict`. To save memory, we overwrite
-     * this space with `components_dict`, avoiding waste. */
+    /** `html_files_paths` is no longer needed since file paths are now stored as keys in
+     * `components_dict`. Shift `components_dict` to occupy its memory space to prevent waste. */
     char *start = html_files_paths;
     memcpy(start, components_dict, components_dict_length);
     Dict html_raw_components_dict = {0};
@@ -2885,9 +2786,9 @@ Dict load_templates(const char *base_path) {
 
     size_t templates_dict_length = tmp_templates_dict - templates_dict;
 
-    /** The memory allocated for raw HTML components is no longer needed, as they have
-     * been compiled and stored in the `templates_dict`. To optimize memory usage,
-     * we overwrite this space with `templates_dict`, preventing wastage. */
+    /** `html_raw_components` is no longer needed since they have been compiled
+     * into the `templates_dict`. Shift `templates_dict` to occupy its memory
+     * space to prevent waste. */
     char *start = html_raw_components.start_addr;
     memcpy(start, templates_dict, templates_dict_length);
     p_global_arena_data->templates.start_addr = start;
@@ -2899,7 +2800,7 @@ Dict load_templates(const char *base_path) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * Creates and configures a server socket to listen on the specified port.
  */
 Socket *create_server_socket(uint16_t port) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
@@ -2933,9 +2834,6 @@ Socket *create_server_socket(uint16_t port) {
     return p_global_arena_data->socket;
 }
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 void create_connection_pool(Dict envs) {
     uint8_t i;
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
