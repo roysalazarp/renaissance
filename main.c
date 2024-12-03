@@ -27,8 +27,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-/** TODO: Update README and comment all code thoroughly before making the project publicly known */
-
 /*
 +-----------------------------------------------------------------------------------+
 |                                     defines                                       |
@@ -96,7 +94,7 @@
 typedef enum { SERVER_SOCKET, CLIENT_SOCKET, DB_SOCKET } FDType;
 
 typedef struct {
-    FDType type;
+    FDType type; /** This need to be the first element in the struct */
     int fd;
 } Socket;
 
@@ -126,7 +124,6 @@ typedef struct {
 } BlockLocation;
 
 typedef struct {
-    char *db_connection_string;
     Socket *socket;
     Dict public_files_dict;
     Dict templates;
@@ -138,19 +135,17 @@ typedef struct {
     int client_socket;
     char *request;
     char *response;
-    void *local; /** Do I really need this ??? */
 } ScratchArenaDataLookup;
 
 typedef struct {
     int fd;
-    Arena *scratch_arena_raw;
     ScratchArenaDataLookup *scratch_arena_data;
     jmp_buf jmp_buf;
     uint8_t queued;
 } Client;
 
 typedef struct {
-    FDType type;
+    FDType type; /** This need to be the first element in the struct */
     uint8_t index;
     PGconn *conn;
     Client client;
@@ -182,8 +177,7 @@ Dict load_html_components(const char *base_path);
 Dict load_templates(const char *base_path);
 void resolve_slots(char *component_markdown, char *import_statement, char **templates);
 BlockLocation find_block(char *template, char *block_name);
-size_t _render_val(char *template, char *val_name, char *value);
-#define render_val(template, val_name, value) _render_val((template), (val_name "\""), (value))
+size_t render_val(char *template, char *val_name, char *value);
 size_t render_for(char *template, char *scope, int times, ...);
 size_t replace_val(char *template, char *value_name, char *value);
 size_t html_minify(char *buffer, char *html, size_t html_length);
@@ -221,7 +215,7 @@ Dict parse_and_decode_params(Arena *scratch_arena_raw, String raw_query_params);
 Dict load_env_variables(const char *filepath);
 void read_file(char **buffer, long *file_size, const char *absolute_file_path);
 char *locate_files(char *buffer, const char *base_path, const char *extension, uint8_t level, uint8_t *total_html_files, size_t *all_paths_length);
-char *find_value(const char key[], size_t key_length, Dict dict);
+char *find_value(const char key[], Dict dict);
 int generate_salt(uint8_t *salt, size_t salt_size);
 uint8_t get_dict_size(Dict dict);
 
@@ -293,16 +287,16 @@ int main() {
 
     Dict envs = load_env_variables(ENV_FILE_PATH);
 
-    const char *public_base_path = find_value("COMPILE_PUBLIC_FOLDER", sizeof("COMPILE_PUBLIC_FOLDER"), envs);
+    const char *public_base_path = find_value("COMPILE_PUBLIC_FOLDER", envs);
     load_public_files(public_base_path);
 
-    const char *html_base_path = find_value("COMPILE_TEMPLATES_FOLDER", sizeof("COMPILE_TEMPLATES_FOLDER"), envs);
+    const char *html_base_path = find_value("COMPILE_TEMPLATES_FOLDER", envs);
     load_templates(html_base_path); /** TODO: Review the code inside this function */
 
     epoll_fd = epoll_create1(0);
     assert(epoll_fd != -1);
 
-    const char *port_str = find_value("PORT", sizeof("PORT"), envs);
+    const char *port_str = find_value("PORT", envs);
 
     char *endptr;
     long port = strtol(port_str, &endptr, 10);
@@ -319,9 +313,9 @@ int main() {
     event.data.ptr = server_socket;
     assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) != -1);
 
-    const char *crt_path = find_value("COMPILE_CRT_PATH", sizeof("COMPILE_CRT_PATH"), envs);
-    const char *crt_key_path = find_value("COMPILE_CRT_KEY_PATH", sizeof("COMPILE_CRT_KEY_PATH"), envs);
-    const char *crt_ca_path = find_value("COMPILE_CRT_CA_PATH", sizeof("COMPILE_CRT_CA_PATH"), envs);
+    const char *crt_path = find_value("COMPILE_CRT_PATH", envs);
+    const char *crt_key_path = find_value("COMPILE_CRT_KEY_PATH", envs);
+    const char *crt_ca_path = find_value("COMPILE_CRT_CA_PATH", envs);
 
     SSL_library_init();
     OpenSSL_add_all_algorithms();
@@ -359,9 +353,6 @@ int main() {
                         int client_fd_flags = fcntl(client_fd, F_GETFL, 0);
                         assert(fcntl(client_fd, F_SETFL, client_fd_flags | O_NONBLOCK) != -1);
 
-                        /** TODO: Create better logs to trace a request lifetime */
-                        printf("Initiated - client-fd: %d\n", client_fd);
-
                         /** Allocate memory for handling client request */
                         Arena *scratch_arena_raw = arena_init(PAGE_SIZE * 10);
                         Socket *client_socket_info = (Socket *)arena_alloc(scratch_arena_raw, sizeof(Socket));
@@ -372,20 +363,14 @@ int main() {
                         scratch_arena_data->arena = scratch_arena_raw;
                         scratch_arena_data->client_socket = client_fd;
 
-                        /* Create an SSL object for the connection */
                         SSL *ssl = SSL_new(ssl_ctx);
                         assert(ssl);
 
                         scratch_arena_data->ssl = ssl;
-
-                        /* Associate the socket with the SSL object */
                         SSL_set_fd(ssl, client_fd);
-
-                        /* Perform SSL handshake in non-blocking mode */
                         int ret = SSL_accept(ssl);
 
                         int ssl_error = SSL_get_error(ssl, ret);
-
                         assert(ssl_error == SSL_ERROR_WANT_READ);
 
                         event.events = EPOLLIN | EPOLLET;
@@ -460,7 +445,8 @@ int main() {
                 }
 
                 default: {
-                    /* TODO: ??? */
+                    assert(0);
+
                     break;
                 }
             }
@@ -481,7 +467,6 @@ int main() {
 void router(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
-    int client_socket = scratch_arena_data->client_socket;
     SSL *ssl = scratch_arena_data->ssl;
 
     char *request = (char *)scratch_arena_raw->current;
@@ -513,7 +498,7 @@ void router(Arena *scratch_arena_raw) {
         }
 
         if (incomming_stream_size <= 0) {
-            printf("fd %d - Empty request\n", client_socket);
+            printf("fd %d - Empty request\n", scratch_arena_data->client_socket);
             return;
         }
 
@@ -608,12 +593,7 @@ void router(Arena *scratch_arena_raw) {
 
     if (strncmp(url.start_addr, URL("/"), strlen(URL("/"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request);
             Dict replacements = {0};
-
-            if (query_params.length > 0) {
-                replacements = parse_and_decode_params(scratch_arena_raw, query_params);
-            }
 
             view_get(scratch_arena_raw, "home", replacements);
             return;
@@ -622,6 +602,7 @@ void router(Arena *scratch_arena_raw) {
 
     if (strncmp(url.start_addr, URL("/test"), strlen(URL("/test"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
+
             test_get(scratch_arena_raw);
             return;
         }
@@ -692,7 +673,8 @@ void router(Arena *scratch_arena_raw) {
         }
     }
 
-    not_found(client_socket);
+    not_found(scratch_arena_data->client_socket);
+
     return;
 }
 
@@ -975,7 +957,7 @@ void view_get(Arena *scratch_arena_raw, char *view, Dict replaces) {
     int client_socket = scratch_arena_data->client_socket;
     SSL *ssl = scratch_arena_data->ssl;
 
-    char *template = find_value(view, strlen(view), p_global_arena_data->templates);
+    char *template = find_value(view, p_global_arena_data->templates);
 
     if (replaces.start_addr) {
         char *template_cpy = (char *)scratch_arena_raw->current;
@@ -1038,7 +1020,6 @@ DBConnection *get_connection(Arena *scratch_arena_raw) {
         if (connection_pool[i].client.fd == 0) {
 
             connection_pool[i].client.fd = scratch_arena_data->client_socket;
-            connection_pool[i].client.scratch_arena_raw = scratch_arena_raw;
             connection_pool[i].client.scratch_arena_data = scratch_arena_data;
 
             DBConnection *connection = &(connection_pool[i]);
@@ -1074,7 +1055,6 @@ QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
             /* Available spot in the queue */
 
             queue[i].client.fd = scratch_arena_data->client_socket;
-            queue[i].client.scratch_arena_raw = scratch_arena_raw;
             queue[i].client.scratch_arena_data = scratch_arena_data;
             queue[i].client.queued = 1;
 
@@ -1227,9 +1207,9 @@ void register_create_account_post(Arena *scratch_arena_raw) {
     String body = find_body(scratch_arena_data->request);
     Dict params = parse_and_decode_params(scratch_arena_raw, body);
 
-    char *email = find_value("email", strlen("email"), params);
-    char *password = find_value("password", strlen("password"), params);
-    char *repeat_password = find_value("password-again", strlen("password-again"), params);
+    char *email = find_value("email", params);
+    char *password = find_value("password", params);
+    char *repeat_password = find_value("password-again", params);
 
     char validation_error_msg[255];
 
@@ -1409,7 +1389,7 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
     String body = find_body(scratch_arena_data->request);
     Dict params = parse_and_decode_params(scratch_arena_raw, body);
 
-    char *email = find_value("email", strlen("email"), params);
+    char *email = find_value("email", params);
 
     const char *command = "SELECT email FROM app.users WHERE email = $1";
     Oid paramTypes[1] = {25};
@@ -1567,7 +1547,7 @@ void public_get(Arena *scratch_arena_raw, String url) {
     strncpy(tmp_path, url.start_addr, url.length);
 
     char *public_file_type = file_content_type(scratch_arena_raw, path);
-    char *content = find_value(path, strlen(path), p_global_arena_data->public_files_dict);
+    char *content = find_value(path, p_global_arena_data->public_files_dict);
 
     char *response = (char *)scratch_arena_raw->current;
     scratch_arena_data->response = response;
@@ -1681,7 +1661,7 @@ size_t replace_val(char *template, char *val_name, char *value) {
 /**
  * TODO: ADD FUNCTION DOCUMENTATION
  */
-size_t _render_val(char *template, char *val_name, char *value) {
+size_t render_val(char *template, char *val_name, char *value) {
     char *ptr = template;
     uint8_t inside = 0;
     while (*ptr != '\0') {
@@ -1702,7 +1682,6 @@ size_t _render_val(char *template, char *val_name, char *value) {
                 size_t value_name_length = 0;
                 char *value_name = ptr + strlen(VAL_OPENING_TAG__START);
                 char *tmp = value_name;
-                tmp++;
 
                 while (*tmp != '"') {
                     value_name_length++;
@@ -1711,9 +1690,13 @@ size_t _render_val(char *template, char *val_name, char *value) {
 
                 TagLocation val_tag = {0};
                 val_tag.start_addr = ptr;
-                val_tag.end_addr = ptr + strlen(VAL_OPENING_TAG__START) + value_name_length + strlen(VAL_SELF_CLOSING_TAG__END) + 1;
+                val_tag.end_addr = ptr + strlen(VAL_OPENING_TAG__START) + value_name_length + strlen(VAL_SELF_CLOSING_TAG__END);
 
-                if (strncmp(val_name, value_name, strlen(val_name)) == 0) {
+                char buff[255];
+                memset(buff, 0, 255);
+                sprintf(buff, "%s\"", val_name);
+
+                if (strncmp(buff, value_name, strlen(buff)) == 0) {
                     size_t val_length = strlen(value);
 
                     memmove(ptr + val_length, val_tag.end_addr, strlen(val_tag.end_addr) + 1);
@@ -1776,39 +1759,53 @@ size_t render_for(char *template, char *block_name, int times, ...) {
         key_value = va_arg(args, CharsBlock);
 
         char *ptr = block_copy;
-        uint8_t inside = 0;
-        while (ptr < block_copy_end) {
-            if (strncmp(ptr, FOR_OPENING_TAG__START, strlen(FOR_OPENING_TAG__START)) == 0) {
-                inside++;
+
+        if (!key_value.start_addr && !key_value.end_addr) {
+            while (ptr < block_copy_end) {
+                *start = *ptr;
+
+                start++;
+                ptr++;
             }
 
-            if (strncmp(ptr, FOR_CLOSING_TAG, strlen(FOR_CLOSING_TAG)) == 0) {
-                if (inside > 0) {
-                    inside--;
-                } else {
-                    assert(0);
+            continue;
+        } else {
+            uint8_t inside = 0;
+            while (ptr < block_copy_end) {
+                if (strncmp(ptr, FOR_OPENING_TAG__START, strlen(FOR_OPENING_TAG__START)) == 0) {
+                    inside++;
                 }
-            }
 
-            if (strncmp(ptr, VAL_OPENING_TAG__START, strlen(VAL_OPENING_TAG__START)) == 0) {
-                if (inside == 0) {
-                    size_t val_name_length = 0;
-                    char *val_name = ptr + strlen(VAL_OPENING_TAG__START);
-                    char *tmp = val_name;
-                    tmp++;
-
-                    while (*tmp != '"') {
-                        val_name_length++;
-                        tmp++;
+                if (strncmp(ptr, FOR_CLOSING_TAG, strlen(FOR_CLOSING_TAG)) == 0) {
+                    if (inside > 0) {
+                        inside--;
+                    } else {
+                        assert(0);
                     }
+                }
 
-                    TagLocation val_tag = {0};
-                    val_tag.start_addr = ptr;
-                    val_tag.end_addr = ptr + strlen(VAL_OPENING_TAG__START) + val_name_length + strlen(VAL_SELF_CLOSING_TAG__END) + 1;
+                if (strncmp(ptr, VAL_OPENING_TAG__START, strlen(VAL_OPENING_TAG__START)) == 0) {
+                    if (inside == 0) {
+                        size_t val_name_length = 0;
+                        char *val_name = ptr + strlen(VAL_OPENING_TAG__START);
+                        char *tmp = val_name;
 
-                    char *value = find_value(val_name, val_name_length, key_value);
+                        while (*tmp != '"') {
+                            val_name_length++;
+                            tmp++;
+                        }
 
-                    if (value) {
+                        TagLocation val_tag = {0};
+                        val_tag.start_addr = ptr;
+                        val_tag.end_addr = ptr + strlen(VAL_OPENING_TAG__START) + val_name_length + strlen(VAL_SELF_CLOSING_TAG__END);
+
+                        char buff[255];
+                        memset(buff, 0, 255);
+                        memcpy(buff, val_name, val_name_length);
+
+                        char *value = find_value(buff, key_value);
+                        assert(value);
+
                         size_t val_length = strlen(value);
                         memcpy(start, value, val_length);
 
@@ -1818,14 +1815,13 @@ size_t render_for(char *template, char *block_name, int times, ...) {
                         continue;
                     }
                 }
+
+                *start = *ptr;
+
+                start++;
+                ptr++;
             }
-
-            *start = *ptr;
-
-            start++;
-            ptr++;
         }
-
         /*
         after = start;
         */
@@ -1928,7 +1924,7 @@ void test_get(Arena *scratch_arena_raw) {
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-    char *template = find_value("test", sizeof("test"), p_global_arena_data->templates);
+    char *template = find_value("test", p_global_arena_data->templates);
 
     char *template_cpy = (char *)scratch_arena_raw->current;
 
@@ -2325,12 +2321,12 @@ String find_http_request_value(const char key[], char *request) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * Finds the value associated with a given key in a dictionary.
  */
-char *find_value(const char key[], size_t key_length, Dict dict) {
+char *find_value(const char key[], Dict dict) {
     char *ptr = dict.start_addr;
     while (ptr < dict.end_addr) {
-        if (strncmp(ptr, key, key_length) == 0) {
+        if (strncmp(ptr, key, strlen(key) + 1) == 0) { /** +1 to include null-terminator */
             ptr += strlen(ptr) + 1;
             return (ptr);
         }
@@ -2342,9 +2338,6 @@ char *find_value(const char key[], size_t key_length, Dict dict) {
     return NULL;
 }
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 Dict load_env_variables(const char *filepath) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
 
@@ -2946,10 +2939,10 @@ Socket *create_server_socket(uint16_t port) {
 void create_connection_pool(Dict envs) {
     uint8_t i;
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
-        char *database = find_value("DB_NAME", sizeof("DB_NAME"), envs);
-        char *user = find_value("DB_USER", sizeof("DB_USER"), envs);
-        char *password = find_value("PASSWORD", sizeof("PASSWORD"), envs);
-        char *host = find_value("HOST", sizeof("HOST"), envs);
+        char *database = find_value("DB_NAME", envs);
+        char *user = find_value("DB_USER", envs);
+        char *password = find_value("PASSWORD", envs);
+        char *host = find_value("HOST", envs);
 
         const char *keys[] = {"dbname", "user", "password", "host", NULL};
         const char *values[5];
