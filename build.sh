@@ -8,7 +8,6 @@ if [ -z "$BUILD_ENV" ]; then
     exit 1
 fi
 
-# Create the build folder for the environment
 BUILD_DIR="./build-$BUILD_ENV"
 
 rm -rf "$BUILD_DIR"

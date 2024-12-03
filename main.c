@@ -207,7 +207,7 @@ void auth_validate_email_post(Arena *scratch_arena_raw);
 void register_create_account_post(Arena *scratch_arena_raw);
 void login_create_session_post(Arena *scratch_arena_raw);
 void not_found(int client_socket);
-void release_resources_and_exit(Arena *scratch_arena_raw, DBConnection *connection);
+void release_request_resources_and_exit(Arena *scratch_arena_raw, DBConnection *connection);
 
 /** Request utils */
 
@@ -285,9 +285,6 @@ jmp_buf db_ctx;
 +-----------------------------------------------------------------------------------+
 */
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 int main() {
     int i;
 
@@ -655,7 +652,7 @@ void router(Arena *scratch_arena_raw) {
         }
     }
 
-    not_found(scratch_arena_data->client_socket);
+    view_get(scratch_arena_raw, "not_found", false);
 
     return;
 }
@@ -902,11 +899,13 @@ void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
-    String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request);
-
     Dict replaces = {0};
-    if (query_params.length > 0 && accepts_query_params) {
-        replaces = parse_and_decode_params(scratch_arena_raw, query_params);
+    if (accepts_query_params) {
+        String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request);
+
+        if (query_params.length > 0) {
+            replaces = parse_and_decode_params(scratch_arena_raw, query_params);
+        }
     }
 
     int client_socket = scratch_arena_data->client_socket;
@@ -1004,7 +1003,18 @@ QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
 }
 
 void login_create_session_post(Arena *scratch_arena_raw) {
-    printf("%lu\n", scratch_arena_raw->size);
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+
+    int client_socket = scratch_arena_data->client_socket;
+    SSL *ssl = scratch_arena_data->ssl;
+
+    char response_headers[] = "HTTP/1.1 200 OK\r\nHX-Redirect: /\r\n\r\n";
+
+    if (SSL_write(ssl, response_headers, strlen((char *)response_headers)) == -1) {
+    }
+
+    SSL_free(ssl);
+    close(client_socket);
 
     return;
 }
@@ -1241,7 +1251,7 @@ void register_create_account_post(Arena *scratch_arena_raw) {
     SSL_free(ssl);
     close(client_socket);
 
-    release_resources_and_exit(scratch_arena_raw, connection);
+    release_request_resources_and_exit(scratch_arena_raw, connection);
 }
 
 /**
@@ -1429,20 +1439,6 @@ char *file_content_type(Arena *scratch_arena_raw, const char *path) {
     assert(0);
 }
 
-/**
- * @brief Serves requested static text file from the public directory or its subfolders.
- *
- * This function retrieves and serves text files from a folder specified by the `PUBLIC_FOLDER`
- * environment variable. It constructs the file path from the provided URL, determines the content
- * type, and sends the file's contents as an HTTP response to the client.
- *
- * @param scratch_arena_raw Pointer to an `Arena` representing the current request and client context.
- * @param url A `String` representing the requested URL path. The file is retrieved relative to the
- *            `PUBLIC_FOLDER` directory.
- *
- * @warning The content of the file is sent as plain text. This function assumes the file exists in the
- *          directory structure specified by the `PUBLIC_FOLDER` environment variable.
- */
 void public_get(Arena *scratch_arena_raw, String url) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -1568,9 +1564,6 @@ size_t replace_val(char *template, char *val_name, char *value) {
     return strlen(template);
 }
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 size_t render_val(char *template, char *val_name, char *value) {
     char *ptr = template;
     uint8_t inside = 0;
@@ -1653,9 +1646,6 @@ size_t render_for(char *template, char *block_name, int times, ...) {
     char *block_copy_end = block_copy + block_length;
 
     char *start = block.opening_tag.start_addr;
-    /*
-    char *after = block.closing_tag.after;
-    */
 
     size_t after_copy_lenght = strlen(block.closing_tag.end_addr);
     char *after_copy = (char *)malloc((after_copy_lenght + 1) * sizeof(char));
@@ -1732,9 +1722,6 @@ size_t render_for(char *template, char *block_name, int times, ...) {
                 ptr++;
             }
         }
-        /*
-        after = start;
-        */
     }
 
     memcpy(start, after_copy, after_copy_lenght);
@@ -1756,7 +1743,7 @@ size_t render_for(char *template, char *block_name, int times, ...) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * A dummy page used for testing purposes.
  */
 void test_get(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
@@ -1922,20 +1909,6 @@ void test_get(Arena *scratch_arena_raw) {
     }
 }
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
-void not_found(int client_socket) {
-    char response[] = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n\r\n"
-                      "<html><body><h1>404 Not Found</h1></body></html>";
-
-    if (send(client_socket, response, strlen(response), 0) == -1) {
-    }
-
-    close(client_socket);
-}
-
-/* Converts a nibble (4 bits) to its hexadecimal representation */
 char char_to_hex(unsigned char nibble) {
     if (nibble < 10) {
         return '0' + nibble;
@@ -1992,7 +1965,7 @@ size_t url_encode_utf8(char **string, size_t length) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * Decodes a URL-encoded UTF-8 string in place,
  */
 size_t url_decode_utf8(char **string, size_t length) {
     char *out = *string;
@@ -2019,9 +1992,6 @@ size_t url_decode_utf8(char **string, size_t length) {
     return new_len;
 }
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 char hex_to_char(unsigned char c) {
     if (c >= '0' && c <= '9') {
         return c - '0';
@@ -2097,7 +2067,7 @@ void read_file(char **buffer, long *file_size, const char *absolute_file_path) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * Locates the value corresponding to a specified key from the given HTTP request string.
  */
 String find_http_request_value(const char key[], char *request) {
     String value = {0};
@@ -2411,12 +2381,13 @@ Dict load_env_variables(const char *filepath) {
     return envs_dict;
 }
 
+/**
+ * Loads all public files (such as .js, .css, .json) excluding HTML files, from the specified `base_path`.
+ */
 Dict load_public_files(const char *base_path) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
-    /** Find the paths of all static(js, css, json, png, etc) files
-     * (in this case, all file stored in PUBLIC_FOLDER or subfolders) */
     char *public_files_paths = (char *)p_global_arena_raw->current;
     uint8_t public_files_count = 0;
     size_t all_paths_length = 0;
@@ -2560,6 +2531,9 @@ size_t html_minify(char *buffer, char *html, size_t html_length) {
     return length;
 }
 
+/**
+ * Loads all HTML components from the specified `base_path`.
+ */
 Dict load_html_components(const char *base_path) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
 
@@ -2655,7 +2629,7 @@ uint8_t get_dict_size(Dict dict) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * Loads and resolves all HTML components along with their imports from the specified `base_path`.
  */
 Dict load_templates(const char *base_path) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
@@ -2799,9 +2773,6 @@ Dict load_templates(const char *base_path) {
     return p_global_arena_data->templates;
 }
 
-/**
- * Creates and configures a server socket to listen on the specified port.
- */
 Socket *create_server_socket(uint16_t port) {
     Arena *p_global_arena_raw = _p_global_arena_raw;
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
@@ -2851,20 +2822,19 @@ void create_connection_pool(Dict envs) {
         values[4] = NULL;
 
         connection_pool[i].conn = PQconnectStartParams(keys, values, 0);
-        if (PQstatus(connection_pool[i].conn) != CONNECTION_BAD) {
-            PQsetnonblocking(connection_pool[i].conn, 1);
 
-            connection_pool[i].type = DB_SOCKET;
-            connection_pool[i].index = i;
+        assert(PQstatus(connection_pool[i].conn) != CONNECTION_BAD); /** Connection failed */
 
-            int fd = PQsocket(connection_pool[i].conn);
+        PQsetnonblocking(connection_pool[i].conn, 1);
 
-            event.events = EPOLLOUT;
-            event.data.ptr = &(connection_pool[i]);
-            assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event) != -1);
-        } else {
-            fprintf(stderr, "Connection failed: %s\n", PQerrorMessage(connection_pool[i].conn));
-        }
+        connection_pool[i].type = DB_SOCKET;
+        connection_pool[i].index = i;
+
+        int fd = PQsocket(connection_pool[i].conn);
+
+        event.events = EPOLLOUT;
+        event.data.ptr = &(connection_pool[i]);
+        epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event);
     }
 
     int count = 0;
@@ -2903,7 +2873,7 @@ void create_connection_pool(Dict envs) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * Initializes a new memory arena, with the arena header stored at the beginning of the allocated memory block.
  */
 Arena *arena_init(size_t size) {
     Arena *arena = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -2919,7 +2889,7 @@ Arena *arena_init(size_t size) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * Allocates memory from the arena and advances the current pointer by the requested size.
  */
 void *arena_alloc(Arena *arena, size_t size) {
     if ((uint8_t *)arena->current + size > (uint8_t *)arena->start + arena->size) {
@@ -2933,7 +2903,7 @@ void *arena_alloc(Arena *arena, size_t size) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ *  Resets the arena allocator by clearing its used memory and resetting the current pointer.
  */
 void arena_reset(Arena *arena, size_t arena_header_size) {
     uint8_t *start = (uint8_t *)arena->start + arena_header_size;
@@ -2944,9 +2914,6 @@ void arena_reset(Arena *arena, size_t arena_header_size) {
     arena->current = start;
 }
 
-/**
- * TODO: ADD FUNCTION DOCUMENTATION
- */
 void arena_free(Arena *arena) {
     if (munmap(arena->start, arena->size) == -1) {
         assert(0);
@@ -2954,7 +2921,7 @@ void arena_free(Arena *arena) {
 }
 
 /**
- * TODO: ADD FUNCTION DOCUMENTATION
+ * Encapsulates boilerplate logic for printing the result of a PostgreSQL query in a formatted table.
  */
 void print_query_result(PGresult *query_result) {
     PQprintOpt options = {0};          /* Initialize to zero to avoid garbage values */
@@ -2970,8 +2937,8 @@ void print_query_result(PGresult *query_result) {
     PQprint(stdout, query_result, &options);
 }
 
-void release_resources_and_exit(Arena *scratch_arena_raw, DBConnection *connection) {
-    uint8_t was_queued = connection->client.queued;
+void release_request_resources_and_exit(Arena *scratch_arena_raw, DBConnection *connection) {
+    uint8_t was_request_queued = connection->client.queued;
 
     /* Set connection as unused */
     memset(&(connection->client), 0, sizeof(Client));
@@ -2984,9 +2951,9 @@ void release_resources_and_exit(Arena *scratch_arena_raw, DBConnection *connecti
 
     arena_free(scratch_arena_raw);
 
-    if (was_queued) {
+    if (was_request_queued) {
         longjmp(db_ctx, 1);
-    } else {
-        longjmp(ctx, 1);
     }
+
+    longjmp(ctx, 1);
 }
