@@ -37,6 +37,18 @@
 #define MAP_ANONYMOUS 0x20
 #endif
 
+#define N0 0
+#define N1 1
+#define N2 2
+#define N3 3
+#define N4 4
+#define N5 5
+#define N6 6
+#define N7 7
+#define N8 8
+#define N9 9
+#define N10 10
+
 #define ENV_FILE_PATH "./.env"
 
 #define MAX_PATH_LENGTH 300
@@ -76,6 +88,20 @@
 #define SALT_LENGTH 16
 #define PASSWORD_BUFFER 255 /** Do I need this ??? */
 
+#define BINARY N1
+#define TEXT N0
+
+#define N1_PARAMS N1
+#define N2_PARAMS N2
+#define N3_PARAMS N3
+#define N4_PARAMS N4
+#define N5_PARAMS N5
+#define N6_PARAMS N6
+#define N7_PARAMS N7
+#define N8_PARAMS N8
+#define N9_PARAMS N9
+#define N10_PARAMS N10
+
 /**
  * NOTE: Implement a regular expression for email validation that adheres
  * to the RFC 5322 Official Standard. Using RFC 5322 regex as shown in
@@ -92,8 +118,8 @@
 */
 
 typedef int boolean;
-#define true 1
-#define false 0
+#define true N1
+#define false N0
 
 typedef enum { SERVER_SOCKET, CLIENT_SOCKET, DB_SOCKET } FDType;
 
@@ -160,6 +186,11 @@ typedef struct {
     Client client;
 } QueuedRequest;
 
+typedef struct {
+    PGresult *result;
+    DBConnection *connection;
+} DBQueryCtx;
+
 /*
 +-----------------------------------------------------------------------------------+
 |                               function declaration                                |
@@ -192,8 +223,8 @@ size_t html_minify(char *buffer, char *html, size_t html_length);
 /** Connection */
 
 void create_connection_pool(Dict envs);
-DBConnection *get_connection(Arena *scratch_arena_raw);
-QueuedRequest *put_in_queue(Arena *scratch_arena_raw);
+DBConnection *get_available_connection(Arena *scratch_arena_raw);
+DBQueryCtx WPQsendQueryParams(DBConnection *connection, const char *command, int nParams, const Oid *paramTypes, const char *const *paramValues, const int *paramLengths, const int *paramFormats, int resultFormat);
 PGresult *get_result(DBConnection *connection);
 void print_query_result(PGresult *query_result);
 
@@ -591,6 +622,25 @@ void router(Arena *scratch_arena_raw) {
 
     String url = find_http_request_value("URL", scratch_arena_data->request);
 
+    if (strncmp(url.start_addr, URL("/manifest.json"), strlen(URL("/manifest.json"))) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
+        char buff[] = "/public/manifest.json";
+        String new_url = {0};
+        new_url.start_addr = buff;
+        new_url.length = strlen(buff);
+
+        public_get(scratch_arena_raw, new_url);
+        return;
+    }
+    if (strncmp(url.start_addr, URL("/.well-known/assetlinks.json"), strlen(URL("/.well-known/assetlinks.json"))) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
+        char buff[] = "/public/.well-known/assetlinks.json";
+        String new_url = {0};
+        new_url.start_addr = buff;
+        new_url.length = strlen(buff);
+
+        public_get(scratch_arena_raw, new_url);
+        return;
+    }
+
     if (strncmp(url.start_addr, "/public", strlen("/public")) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
         public_get(scratch_arena_raw, url);
         return;
@@ -954,8 +1004,12 @@ void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params
 /**
  * Searches the connection pool for an available connection (where `client.fd` is 0) and assigns
  * the current request (represented by `scratch_arena_raw`) to it; returns `NULL` if the pool is full.
+ *
+ * Searches the request queue for an available slot (where `client.fd` is 0) and associates the
+ * current request (represented by `scratch_arena_raw`) with it, marking the request as queued;
+ * returns a pointer to the assigned queue slot.
  */
-DBConnection *get_connection(Arena *scratch_arena_raw) {
+DBConnection *get_available_connection(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     int i;
@@ -972,19 +1026,6 @@ DBConnection *get_connection(Arena *scratch_arena_raw) {
         }
     }
 
-    return NULL;
-}
-
-/**
- * Searches the request queue for an available slot (where `client.fd` is 0) and associates the
- * current request (represented by `scratch_arena_raw`) with it, marking the request as queued;
- * returns a pointer to the assigned queue slot.
- */
-QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
-    int i;
-
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
-
     for (i = 0; i < MAX_CLIENT_CONNECTIONS; i++) {
         if (queue[i].client.fd == 0) {
             /* Available spot in the queue */
@@ -995,15 +1036,120 @@ QueuedRequest *put_in_queue(Arena *scratch_arena_raw) {
 
             QueuedRequest *queued = &(queue[i]);
 
-            return queued;
+            int r = setjmp(queued->client.jmp_buf);
+            if (r == 0) {
+                longjmp(ctx, 1);
+            }
+
+            int index = from_index(r);
+
+            DBConnection *connection = &(connection_pool[index]);
+
+            return connection;
         }
     }
 
     assert(0);
 }
 
+DBQueryCtx WPQsendQueryParams(DBConnection *connection, const char *command, int nParams, const Oid *paramTypes, const char *const *paramValues, const int *paramLengths, const int *paramFormats, int resultFormat) {
+    if (PQsendQueryParams(connection->conn, command, nParams, paramTypes, paramValues, paramLengths, paramFormats, resultFormat) == 0) {
+        fprintf(stderr, "Query failed to send: %s\n", PQerrorMessage(connection->conn));
+        int conn_fd = PQsocket(connection->conn);
+        printf("socket: %d", conn_fd);
+    }
+
+    int conn_fd = PQsocket(connection->conn);
+
+    event.events = EPOLLIN | EPOLLET;
+    event.data.ptr = connection;
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_fd, &event);
+
+    int index;
+    if (connection->client.queued) {
+        int r = setjmp(connection->client.jmp_buf);
+        if (r == 0) {
+            longjmp(db_ctx, 1);
+        }
+
+        index = from_index(r);
+    } else {
+        int r = setjmp(connection->client.jmp_buf);
+        if (r == 0) {
+            longjmp(ctx, 1);
+        }
+
+        index = from_index(r);
+    }
+
+    connection = &connection_pool[index];
+
+    PGresult *result = get_result(connection);
+
+    DBQueryCtx output = {0};
+    output.result = result;
+    output.connection = connection;
+
+    return output;
+}
+
 void login_create_session_post(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+
+    DBConnection *connection = get_available_connection(scratch_arena_raw);
+
+    scratch_arena_data = connection->client.scratch_arena_data;
+    scratch_arena_raw = scratch_arena_data->arena;
+
+    String body = find_body(scratch_arena_data->request);
+    Dict params = parse_and_decode_params(scratch_arena_raw, body);
+
+    char *email = find_value("email", params);
+
+    const char *command_1 = "SELECT id, password FROM app.users WHERE email = $1";
+
+    Oid paramTypes_1[N1_PARAMS] = {25};
+    const char *paramValues_1[N1_PARAMS];
+    paramValues_1[0] = email;
+    int paramLengths_1[N1_PARAMS] = {0};
+    int paramFormats_1[N1_PARAMS] = {0};
+
+    DBQueryCtx query_ctx_1 = WPQsendQueryParams(connection, command_1, N1_PARAMS, paramTypes_1, paramValues_1, paramLengths_1, paramFormats_1, BINARY);
+    connection = query_ctx_1.connection;
+
+    PGresult *result_1 = query_ctx_1.result;
+    print_query_result(result_1);
+
+    char *password = find_value("password", params);
+    char *stored_password = PQgetvalue(result_1, 0, 1); /* First row, Second column */
+
+    if (argon2i_verify(stored_password, password, strlen(password)) != ARGON2_OK) {
+        fprintf(stderr, "Failed to verify password\nError code: %d\n", errno);
+    }
+
+    unsigned char *user_id = (unsigned char *)PQgetvalue(result_1, 0, 0);
+
+    /** Create session */
+    const char *command_2 = "INSERT INTO app.users_sessions (user_id, expires_at) "
+                            "VALUES ($1, NOW() + INTERVAL '1 hour') "
+                            "ON CONFLICT (user_id) DO UPDATE SET "
+                            "updated_at = NOW(), expires_at = EXCLUDED.expires_at "
+                            "RETURNING id, created_at, updated_at, expires_at;";
+
+    Oid paramTypes_2[N1_PARAMS] = {2950};
+    const char *paramValues_2[N1_PARAMS];
+    paramValues_2[0] = (const char *)user_id;
+    int paramLengths_2[N1_PARAMS] = {16};
+    int paramFormats_2[N1_PARAMS] = {1};
+
+    DBQueryCtx query_ctx_2 = WPQsendQueryParams(connection, command_2, N1_PARAMS, paramTypes_2, paramValues_2, paramLengths_2, paramFormats_2, BINARY);
+    connection = query_ctx_2.connection;
+
+    scratch_arena_data = connection->client.scratch_arena_data;
+    scratch_arena_raw = scratch_arena_data->arena;
+
+    PGresult *result_2 = query_ctx_2.result;
+    print_query_result(result_2);
 
     int client_socket = scratch_arena_data->client_socket;
     SSL *ssl = scratch_arena_data->ssl;
@@ -1124,25 +1270,10 @@ int validate_email(char *error_message_buffer, const char *email) {
 void register_create_account_post(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
-    DBConnection *connection = get_connection(scratch_arena_raw);
+    DBConnection *connection = get_available_connection(scratch_arena_raw);
 
-    if (connection == NULL) {
-        QueuedRequest *queued = put_in_queue(scratch_arena_raw);
-
-        int r = setjmp(queued->client.jmp_buf);
-        if (r == 0) {
-            longjmp(ctx, 1);
-        }
-
-        int index = from_index(r);
-
-        connection = &(connection_pool[index]);
-
-        scratch_arena_data = connection->client.scratch_arena_data;
-        scratch_arena_raw = scratch_arena_data->arena;
-    }
-
-    assert(connection != NULL);
+    scratch_arena_data = connection->client.scratch_arena_data;
+    scratch_arena_raw = scratch_arena_data->arena;
 
     String body = find_body(scratch_arena_data->request);
     Dict params = parse_and_decode_params(scratch_arena_raw, body);
@@ -1294,25 +1425,10 @@ PGresult *get_result(DBConnection *connection) {
 void auth_validate_email_post(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
-    DBConnection *connection = get_connection(scratch_arena_raw);
+    DBConnection *connection = get_available_connection(scratch_arena_raw);
 
-    if (connection == NULL) {
-        QueuedRequest *queued = put_in_queue(scratch_arena_raw);
-
-        int r = setjmp(queued->client.jmp_buf);
-        if (r == 0) {
-            longjmp(ctx, 1);
-        }
-
-        int index = from_index(r);
-
-        connection = &(connection_pool[index]);
-
-        scratch_arena_data = connection->client.scratch_arena_data;
-        scratch_arena_raw = scratch_arena_data->arena;
-    }
-
-    assert(connection != NULL);
+    scratch_arena_data = connection->client.scratch_arena_data;
+    scratch_arena_raw = scratch_arena_data->arena;
 
     String body = find_body(scratch_arena_data->request);
     Dict params = parse_and_decode_params(scratch_arena_raw, body);
@@ -1748,25 +1864,10 @@ size_t render_for(char *template, char *block_name, int times, ...) {
 void test_get(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
-    DBConnection *connection = get_connection(scratch_arena_raw);
+    DBConnection *connection = get_available_connection(scratch_arena_raw);
 
-    if (connection == NULL) {
-        QueuedRequest *queued = put_in_queue(scratch_arena_raw);
-
-        int r = setjmp(queued->client.jmp_buf);
-        if (r == 0) {
-            longjmp(ctx, 1);
-        }
-
-        int index = from_index(r);
-
-        connection = &(connection_pool[index]);
-
-        scratch_arena_data = connection->client.scratch_arena_data;
-        scratch_arena_raw = scratch_arena_data->arena;
-    }
-
-    assert(connection != NULL);
+    scratch_arena_data = connection->client.scratch_arena_data;
+    scratch_arena_raw = scratch_arena_data->arena;
 
     const char *command = "SELECT * FROM app.countries WHERE id = $1 OR id = $2";
     Oid paramTypes[2] = {23, 23};

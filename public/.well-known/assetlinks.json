@@ -1,0 +1,10 @@
+[
+    {
+        "relation": ["delegate_permission/common.handle_all_urls"],
+        "target": {
+            "namespace": "android_app",
+            "package_name": "app.littlechef.twa",
+            "sha256_cert_fingerprints": ["1D:7B:47:E9:80:BD:80:EB:B4:4B:85:23:3C:3F:1E:83:3B:6C:3B:19:F5:6C:DE:46:98:38:4E:94:29:B8:E8:3A"]
+        }
+    }
+]
