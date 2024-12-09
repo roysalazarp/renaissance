@@ -10,5 +10,6 @@ RUN apt-get install -y \
     postgresql-client \
     postgresql-contrib \
     libpq-dev \
+    uuid-dev \
     gdb \
     && apt-get clean

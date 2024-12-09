@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <uuid/uuid.h>
 
 /*
 +-----------------------------------------------------------------------------------+
@@ -120,6 +121,8 @@
 typedef int boolean;
 #define true N1
 #define false N0
+
+typedef char uuid_str_t[37];
 
 typedef enum { SERVER_SOCKET, CLIENT_SOCKET, DB_SOCKET } FDType;
 
@@ -234,10 +237,10 @@ void router(Arena *scratch_arena_raw);
 void public_get(Arena *scratch_arena_raw, String url);
 void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params);
 void test_get(Arena *scratch_arena_raw);
+void home_get(Arena *scratch_arena_raw);
 void auth_validate_email_post(Arena *scratch_arena_raw);
 void register_create_account_post(Arena *scratch_arena_raw);
 void login_create_session_post(Arena *scratch_arena_raw);
-void not_found(int client_socket);
 void release_request_resources_and_exit(Arena *scratch_arena_raw, DBConnection *connection);
 
 /** Request utils */
@@ -251,6 +254,7 @@ char hex_to_char(unsigned char c);      /** TODO: Review this function */
 size_t url_encode_utf8(char **string, size_t length);
 size_t url_decode_utf8(char **string, size_t length);
 Dict parse_and_decode_params(Arena *scratch_arena_raw, String raw_query_params);
+String find_cookie_value(const char *key, String cookies);
 
 /** Utils */
 
@@ -648,7 +652,7 @@ void router(Arena *scratch_arena_raw) {
 
     if (strncmp(url.start_addr, URL("/"), strlen(URL("/"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            view_get(scratch_arena_raw, "home", false);
+            home_get(scratch_arena_raw);
             return;
         }
     }
@@ -1093,6 +1097,152 @@ DBQueryCtx WPQsendQueryParams(DBConnection *connection, const char *command, int
     return output;
 }
 
+String find_cookie_value(const char *key, String cookies) {
+    String value = {0};
+
+    if (!cookies.start_addr && cookies.length == 0) {
+        return value;
+    }
+
+    char *ptr = cookies.start_addr;
+    char *cookies_end = cookies.start_addr + cookies.length;
+
+    char *end_sign = "\r\n";
+
+    while (ptr < cookies_end) {
+        if (strncmp(key, ptr, strlen(key)) == 0) {
+            ptr += strlen(key);
+
+            while (isspace(*ptr)) {
+                if (ptr == cookies_end) {
+                    assert(0);
+                }
+
+                ptr++;
+            }
+
+            assert(*ptr == '=');
+            ptr++; /** skip '=' */
+
+            while (isspace(*ptr)) {
+                if (ptr == cookies_end) {
+                    assert(0);
+                }
+
+                ptr++;
+            }
+
+            value.start_addr = ptr;
+
+            while (*ptr != '\0' && !isspace(*ptr) && strncmp(ptr, end_sign, strlen(end_sign)) != 0) {
+                ptr++;
+            }
+
+            value.length = ptr - value.start_addr;
+
+            return value;
+        }
+
+        ptr++;
+    }
+
+    return value;
+}
+
+void home_get(Arena *scratch_arena_raw) {
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+
+    DBConnection *connection = get_available_connection(scratch_arena_raw);
+
+    scratch_arena_data = connection->client.scratch_arena_data;
+    scratch_arena_raw = scratch_arena_data->arena;
+
+    int client_socket = scratch_arena_data->client_socket;
+    SSL *ssl = scratch_arena_data->ssl;
+
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+    char *template = find_value("home", p_global_arena_data->templates);
+
+    char *response;
+
+    String cookie = find_http_request_value("Cookie", scratch_arena_data->request);
+    if (cookie.start_addr && cookie.length) {
+        String session_id_reference = find_cookie_value("session_id", cookie);
+        if (session_id_reference.start_addr && session_id_reference.length) {
+            uuid_str_t session_id_str;
+            memcpy(session_id_str, session_id_reference.start_addr, session_id_reference.length);
+            session_id_str[session_id_reference.length] = '\0';
+
+            uuid_t session_id;
+            uuid_parse(session_id_str, session_id);
+
+            const char *command_1 = "SELECT NOW() < expires_at AS is_expired FROM app.users_sessions WHERE id = $1";
+
+            Oid paramTypes_1[N1_PARAMS] = {2950};
+            const char *paramValues_1[N1_PARAMS];
+            paramValues_1[0] = (const char *)session_id;
+            int paramLengths_1[N1_PARAMS] = {16};
+            int paramFormats_1[N1_PARAMS] = {1};
+
+            DBQueryCtx query_ctx_1 = WPQsendQueryParams(connection, command_1, N1_PARAMS, paramTypes_1, paramValues_1, paramLengths_1, paramFormats_1, TEXT);
+            connection = query_ctx_1.connection;
+
+            PGresult *result_1 = query_ctx_1.result;
+
+            char *value = PQgetvalue(result_1, 0, 0);
+
+            int authenticated = value != NULL && value[0] == 't';
+            if (authenticated) {
+                print_query_result(result_1);
+                PQclear(result_1);
+
+                char *template_cpy = (char *)scratch_arena_raw->current;
+
+                memcpy(template_cpy, template, strlen(template) + 1);
+
+                render_val(template_cpy, "authenticated", "Account");
+
+                scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
+
+                char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+                size_t response_length = strlen(response_headers) + strlen(template_cpy);
+
+                response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
+
+                sprintf(response, "%s%s", response_headers, template_cpy);
+                response[response_length] = '\0';
+
+                goto send_response;
+            }
+        }
+    }
+
+    char *template_cpy = (char *)scratch_arena_raw->current;
+
+    memcpy(template_cpy, template, strlen(template) + 1);
+
+    render_val(template_cpy, "authenticated", "Login");
+
+    scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
+
+    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+    size_t response_length = strlen(response_headers) + strlen(template_cpy);
+
+    response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
+
+    sprintf(response, "%s%s", response_headers, template_cpy);
+    response[response_length] = '\0';
+
+send_response:
+    if (SSL_write(ssl, response, strlen(response)) == -1) {
+    }
+
+    SSL_free(ssl);
+    close(client_socket);
+
+    return;
+}
+
 void login_create_session_post(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
@@ -1134,7 +1284,7 @@ void login_create_session_post(Arena *scratch_arena_raw) {
                             "VALUES ($1, NOW() + INTERVAL '1 hour') "
                             "ON CONFLICT (user_id) DO UPDATE SET "
                             "updated_at = NOW(), expires_at = EXCLUDED.expires_at "
-                            "RETURNING id, created_at, updated_at, expires_at;";
+                            "RETURNING id, to_char(expires_at, 'Dy, DD Mon YYYY HH24:MI:SS GMT') AS expires_at;";
 
     Oid paramTypes_2[N1_PARAMS] = {2950};
     const char *paramValues_2[N1_PARAMS];
@@ -1142,7 +1292,7 @@ void login_create_session_post(Arena *scratch_arena_raw) {
     int paramLengths_2[N1_PARAMS] = {16};
     int paramFormats_2[N1_PARAMS] = {1};
 
-    DBQueryCtx query_ctx_2 = WPQsendQueryParams(connection, command_2, N1_PARAMS, paramTypes_2, paramValues_2, paramLengths_2, paramFormats_2, BINARY);
+    DBQueryCtx query_ctx_2 = WPQsendQueryParams(connection, command_2, N1_PARAMS, paramTypes_2, paramValues_2, paramLengths_2, paramFormats_2, TEXT);
     connection = query_ctx_2.connection;
 
     scratch_arena_data = connection->client.scratch_arena_data;
@@ -1154,9 +1304,20 @@ void login_create_session_post(Arena *scratch_arena_raw) {
     int client_socket = scratch_arena_data->client_socket;
     SSL *ssl = scratch_arena_data->ssl;
 
-    char response_headers[] = "HTTP/1.1 200 OK\r\nHX-Redirect: /\r\n\r\n";
+    char *response = (char *)scratch_arena_raw->current;
 
-    if (SSL_write(ssl, response_headers, strlen((char *)response_headers)) == -1) {
+    char *session_id = PQgetvalue(result_2, 0, 0);
+    char *expires_at = PQgetvalue(result_2, 0, 1);
+
+    sprintf(response,
+            "HTTP/1.1 200 OK\r\n"
+            "Set-Cookie: session_id=%s; Path=/; HttpOnly; Secure; SameSite=Strict; Expires=%s\r\n"
+            "HX-Redirect: /\r\n\r\n",
+            session_id, expires_at);
+
+    scratch_arena_raw->current = response + strlen(response) + 1;
+
+    if (SSL_write(ssl, response, strlen(response)) == -1) {
     }
 
     SSL_free(ssl);
@@ -2285,8 +2446,13 @@ String find_http_request_value(const char key[], char *request) {
                 char *start = ptr + strlen(str);
                 value.start_addr = start;
 
+                char *end_sign = "\r\n";
                 char *end = start;
-                while (*end != '\n') {
+                while (*end != '\0') {
+                    if (strncmp(end, end_sign, strlen(end_sign)) == 0) {
+                        break;
+                    }
+
                     end++;
                 }
 

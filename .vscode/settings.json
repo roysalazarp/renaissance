@@ -13,6 +13,7 @@
         "ranges": "c",
         "tuple": "c",
         "utility": "c",
-        "rand.h": "c"
+        "rand.h": "c",
+        "uuid.h": "c"
     }
 }

@@ -28,7 +28,8 @@ if [ "$BUILD_ENV" == "prod" ]; then
         -largon2 \
         -pthread \
         -lssl \
-        -lcrypto
+        -lcrypto \
+        -luuid
 
 elif [ "$BUILD_ENV" == "dev" ]; then
     echo "Building for development..."
@@ -41,6 +42,8 @@ elif [ "$BUILD_ENV" == "dev" ]; then
         -Werror \
         -pedantic \
         -Wno-declaration-after-statement \
+        -Wno-unused-variable \
+        -Wno-unused-parameter \
         -o "$BUILD_DIR/app" \
         main.c \
         -I/usr/include/postgresql \
@@ -48,7 +51,8 @@ elif [ "$BUILD_ENV" == "dev" ]; then
         -largon2 \
         -pthread \
         -lssl \
-        -lcrypto
+        -lcrypto \
+        -luuid
 
 else
     echo "Invalid or no environment specified. Use 'prod' or 'dev'."
