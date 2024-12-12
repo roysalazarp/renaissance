@@ -151,6 +151,8 @@ typedef CharsBlock Dict;        /** { 'k', 'e', 'y', '\0', 'v', 'a', 'l', 'u', '
 typedef CharsBlock StringArray; /** { 'f', 'o', 'o', '\0', 'b', 'a', 'r', '\0', 'b', 'a', 'z', '\0' ... } */
 typedef CharsBlock TagLocation;
 
+typedef CharsBlock User;
+
 typedef struct {
     TagLocation opening_tag;
     TagLocation closing_tag;
@@ -166,6 +168,7 @@ typedef struct {
     Arena *arena;
     SSL *ssl;
     int client_socket;
+    Socket *client_socket_info;
     char *request;
     char *response;
 } ScratchArenaDataLookup;
@@ -203,6 +206,7 @@ typedef struct {
 /** Server setup */
 
 Socket *create_server_socket(uint16_t port);
+void print_ssl_error(SSL *ssl, int ssl_ret);
 
 /** Arena */
 
@@ -255,6 +259,7 @@ size_t url_encode_utf8(char **string, size_t length);
 size_t url_decode_utf8(char **string, size_t length);
 Dict parse_and_decode_params(Arena *scratch_arena_raw, String raw_query_params);
 String find_cookie_value(const char *key, String cookies);
+User is_authenticated(Arena *scratch_arena_raw, DBConnection *connection);
 
 /** Utils */
 
@@ -264,12 +269,16 @@ char *locate_files(char *buffer, const char *base_path, const char *extension, u
 char *find_value(const char key[], Dict dict);
 int generate_salt(uint8_t *salt, size_t salt_size);
 uint8_t get_dict_size(Dict dict);
+void sigint_handler(int signo);
+void dump_dict(Dict dict, char folder_name[]);
 
 /*
 +-----------------------------------------------------------------------------------+
 |                                     globals                                       |
 +-----------------------------------------------------------------------------------+
 */
+
+volatile sig_atomic_t keep_running = 1;
 
 Arena *_p_global_arena_raw;
 GlobalArenaDataLookup *_p_global_arena_data;
@@ -323,7 +332,16 @@ jmp_buf db_ctx;
 int main() {
     int i;
 
-    _p_global_arena_raw = arena_init(PAGE_SIZE * 20);
+    /**
+     * Registers a signal handler for SIGINT (to terminate the process)
+     * to exit the program gracefully for Valgrind to show the program report.
+     */
+    if (signal(SIGINT, sigint_handler) == SIG_ERR) {
+        fprintf(stderr, "Failed to set up signal handler for SIGINT\nError code: %d\n", errno);
+        assert(0);
+    }
+
+    _p_global_arena_raw = arena_init(PAGE_SIZE * 50);
 
     /** To look up data stored in arena */
     _p_global_arena_data = (GlobalArenaDataLookup *)arena_alloc(_p_global_arena_raw, sizeof(GlobalArenaDataLookup));
@@ -333,8 +351,12 @@ int main() {
     const char *public_base_path = find_value("COMPILE_PUBLIC_FOLDER", envs);
     load_public_files(public_base_path);
 
+    dump_dict(_p_global_arena_data->public_files_dict, "public_files_dict");
+
     const char *html_base_path = find_value("COMPILE_TEMPLATES_FOLDER", envs);
     load_templates(html_base_path); /** TODO: Review the code inside this function */
+
+    dump_dict(_p_global_arena_data->templates, "templates");
 
     epoll_fd = epoll_create1(0);
     assert(epoll_fd != -1);
@@ -382,6 +404,12 @@ int main() {
 
     while (1) {
         nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, BLOCK_EXECUTION);
+
+        if (keep_running == 0) {
+            printf("breaking out\n");
+            break;
+        }
+
         assert(nfds != -1);
 
         for (i = 0; i < nfds; i++) {
@@ -405,16 +433,30 @@ int main() {
                         ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)arena_alloc(scratch_arena_raw, sizeof(ScratchArenaDataLookup));
                         scratch_arena_data->arena = scratch_arena_raw;
                         scratch_arena_data->client_socket = client_fd;
+                        scratch_arena_data->client_socket_info = client_socket_info;
 
                         SSL *ssl = SSL_new(ssl_ctx);
                         assert(ssl);
 
                         scratch_arena_data->ssl = ssl;
                         SSL_set_fd(ssl, client_fd);
-                        int ret = SSL_accept(ssl);
 
-                        int ssl_error = SSL_get_error(ssl, ret);
-                        assert(ssl_error == SSL_ERROR_WANT_READ);
+                        /* Start SSL handshake */
+                        int ssl_ret = SSL_accept(ssl);
+                        if (ssl_ret <= 0) {
+                            int ssl_err = SSL_get_error(ssl, ssl_ret);
+                            if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
+                                /* SSL handshake needs more data, wait for events */
+                                goto continue_later;
+                            } else {
+                                /* Handle other SSL errors (handshake failure) */
+                                printf("SSL handshake failed\n");
+                                assert(0);
+                            }
+                        }
+
+                    continue_later:
+                        printf("\n");
 
                         event.events = EPOLLIN | EPOLLET;
                         event.data.ptr = client_socket_info;
@@ -432,6 +474,36 @@ int main() {
                 case CLIENT_SOCKET: { /** Client socket (aka. client request) ready for read */
                     if (events[i].events & EPOLLIN) {
                         Arena *scratch_arena_raw = (Arena *)((uint8_t *)socket_info - sizeof(Arena));
+                        ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+
+                        SSL *ssl = scratch_arena_data->ssl;
+                        int client_fd = scratch_arena_data->client_socket;
+                        Socket *client_socket_info = scratch_arena_data->client_socket_info;
+
+                        int ssl_ret = SSL_accept(ssl);
+                        if (ssl_ret <= 0) {
+                            int ssl_err = SSL_get_error(ssl, ssl_ret);
+
+                            if (ssl_err == SSL_ERROR_WANT_READ) {
+                                /* The handshake needs more data from the client (waiting for read) */
+                                event.events = EPOLLIN | EPOLLET;
+                                event.data.ptr = client_socket_info;
+                                assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_fd, &event) != -1);
+
+                                continue; /* Wait for the next event when the socket is ready to read */
+                            } else if (ssl_err == SSL_ERROR_WANT_WRITE) {
+                                /* The handshake needs to send more data to the client (waiting for write) */
+                                event.events = EPOLLOUT | EPOLLET; /* Wait for the socket to be writable */
+                                event.data.ptr = client_socket_info;
+                                assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_fd, &event) != -1);
+
+                                continue; /* Wait for the next event when the socket is ready to write */
+                            } else {
+                                /* Handle other SSL errors (e.g., fatal errors) */
+                                printf("SSL handshake failed\n");
+                                assert(0);
+                            }
+                        }
 
                         if (setjmp(ctx) == 0) {
                             router(scratch_arena_raw);
@@ -498,6 +570,10 @@ int main() {
 
     SSL_CTX_free(ssl_ctx);
     close(server_fd);
+
+    for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
+        PQfinish(connection_pool[i].conn);
+    }
 
     arena_free(_p_global_arena_raw);
 
@@ -999,7 +1075,8 @@ void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params
     if (SSL_write(ssl, response, strlen(response)) == -1) {
     }
 
-    SSL_free(ssl);
+    /* SSL_shutdown(ssl); */
+    /* SSL_free(ssl); */
     close(client_socket);
 
     arena_free(scratch_arena_raw);
@@ -1149,21 +1226,10 @@ String find_cookie_value(const char *key, String cookies) {
     return value;
 }
 
-void home_get(Arena *scratch_arena_raw) {
+User is_authenticated(Arena *scratch_arena_raw, DBConnection *connection) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
-    DBConnection *connection = get_available_connection(scratch_arena_raw);
-
-    scratch_arena_data = connection->client.scratch_arena_data;
-    scratch_arena_raw = scratch_arena_data->arena;
-
-    int client_socket = scratch_arena_data->client_socket;
-    SSL *ssl = scratch_arena_data->ssl;
-
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
-    char *template = find_value("home", p_global_arena_data->templates);
-
-    char *response;
+    User user = {0};
 
     String cookie = find_http_request_value("Cookie", scratch_arena_data->request);
     if (cookie.start_addr && cookie.length) {
@@ -1176,7 +1242,10 @@ void home_get(Arena *scratch_arena_raw) {
             uuid_t session_id;
             uuid_parse(session_id_str, session_id);
 
-            const char *command_1 = "SELECT NOW() < expires_at AS is_expired FROM app.users_sessions WHERE id = $1";
+            const char *command_1 = "SELECT u.id, u.email "
+                                    "FROM app.users_sessions us "
+                                    "JOIN app.users u ON u.id = us.user_id "
+                                    "WHERE us.id = $1 AND NOW() < us.expires_at";
 
             Oid paramTypes_1[N1_PARAMS] = {2950};
             const char *paramValues_1[N1_PARAMS];
@@ -1187,34 +1256,87 @@ void home_get(Arena *scratch_arena_raw) {
             DBQueryCtx query_ctx_1 = WPQsendQueryParams(connection, command_1, N1_PARAMS, paramTypes_1, paramValues_1, paramLengths_1, paramFormats_1, TEXT);
             connection = query_ctx_1.connection;
 
+            scratch_arena_data = connection->client.scratch_arena_data;
+            scratch_arena_raw = scratch_arena_data->arena;
+
             PGresult *result_1 = query_ctx_1.result;
 
-            char *value = PQgetvalue(result_1, 0, 0);
-
-            int authenticated = value != NULL && value[0] == 't';
-            if (authenticated) {
+            int num_rows = PQntuples(result_1);
+            if (num_rows) {
                 print_query_result(result_1);
+
+                char *user_info = (char *)scratch_arena_raw->current;
+                char *tmp_user_info = user_info;
+
+                char *user_id = PQgetvalue(result_1, 0, 0);
+                memcpy(tmp_user_info, "user_id", strlen("user_id"));
+                tmp_user_info += strlen("user_id");
+                *tmp_user_info = '\0';
+                tmp_user_info++;
+
+                memcpy(tmp_user_info, user_id, strlen(user_id));
+                tmp_user_info += strlen(user_id);
+                *tmp_user_info = '\0';
+                tmp_user_info++;
+
+                char *user_email = PQgetvalue(result_1, 0, 1);
+                memcpy(tmp_user_info, "user_email", strlen("user_email"));
+                tmp_user_info += strlen("user_email");
+                *tmp_user_info = '\0';
+                tmp_user_info++;
+
+                memcpy(tmp_user_info, user_email, strlen(user_email));
+                tmp_user_info += strlen(user_email);
+                *tmp_user_info = '\0';
+
+                user.start_addr = user_info;
+                user.end_addr = tmp_user_info;
+
+                scratch_arena_raw->current = tmp_user_info + 1;
+
                 PQclear(result_1);
 
-                char *template_cpy = (char *)scratch_arena_raw->current;
-
-                memcpy(template_cpy, template, strlen(template) + 1);
-
-                render_val(template_cpy, "authenticated", "Account");
-
-                scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
-
-                char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-                size_t response_length = strlen(response_headers) + strlen(template_cpy);
-
-                response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
-
-                sprintf(response, "%s%s", response_headers, template_cpy);
-                response[response_length] = '\0';
-
-                goto send_response;
+                return user;
             }
         }
+    }
+
+    return user;
+}
+
+void home_get(Arena *scratch_arena_raw) {
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+
+    DBConnection *connection = get_available_connection(scratch_arena_raw);
+
+    scratch_arena_data = connection->client.scratch_arena_data;
+    scratch_arena_raw = scratch_arena_data->arena;
+
+    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
+    char *template = find_value("home", p_global_arena_data->templates);
+
+    char *response;
+
+    User user = is_authenticated(scratch_arena_raw, connection);
+    if (user.start_addr) {
+        char *template_cpy = (char *)scratch_arena_raw->current;
+
+        memcpy(template_cpy, template, strlen(template) + 1);
+
+        render_val(template_cpy, "authenticated", "Account");
+        replace_val(template_cpy, "authenticated_redirect", "/account");
+
+        scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
+
+        char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+        size_t response_length = strlen(response_headers) + strlen(template_cpy);
+
+        response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
+
+        sprintf(response, "%s%s", response_headers, template_cpy);
+        response[response_length] = '\0';
+
+        goto send_response;
     }
 
     char *template_cpy = (char *)scratch_arena_raw->current;
@@ -1222,6 +1344,7 @@ void home_get(Arena *scratch_arena_raw) {
     memcpy(template_cpy, template, strlen(template) + 1);
 
     render_val(template_cpy, "authenticated", "Login");
+    replace_val(template_cpy, "authenticated_redirect", "/auth");
 
     scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
 
@@ -1233,11 +1356,42 @@ void home_get(Arena *scratch_arena_raw) {
     sprintf(response, "%s%s", response_headers, template_cpy);
     response[response_length] = '\0';
 
-send_response:
+    int client_socket = scratch_arena_data->client_socket;
+    SSL *ssl = scratch_arena_data->ssl;
+
+    /** BUG: https://linux.die.net/man/3/ssl_write#:~:text=If%20the%20underlying%20BIO%20is%20non,BIO%20before%20being%20able%20to%20continue. */
+    /*
     if (SSL_write(ssl, response, strlen(response)) == -1) {
     }
+    */
 
-    SSL_free(ssl);
+send_response:
+    printf("\n");
+
+    int ssl_ret = SSL_write(ssl, response, strlen(response));
+    if (ssl_ret <= 0) {
+        int ssl_err = SSL_get_error(ssl, ssl_ret);
+        if (ssl_err == SSL_ERROR_WANT_WRITE) {
+            /* Wait for the socket to be writable again */
+            event.events = EPOLLOUT | EPOLLET;
+            event.data.ptr = scratch_arena_data->client_socket_info;
+            assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_socket, &event) != -1);
+        } else if (ssl_err == SSL_ERROR_WANT_READ) {
+            printf("SSL_ERROR_WANT_READ\n");
+        } else {
+            print_ssl_error(ssl, ssl_ret);
+
+            assert(0);
+        }
+    } else {
+        /* Successfully wrote the data, switch back to EPOLLIN to read more */
+        event.events = EPOLLIN | EPOLLET;
+        event.data.ptr = scratch_arena_data->client_socket_info;
+        assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_socket, &event) != -1);
+    }
+
+    /* SSL_shutdown(ssl); */
+    /* SSL_free(ssl); */
     close(client_socket);
 
     return;
@@ -1267,8 +1421,13 @@ void login_create_session_post(Arena *scratch_arena_raw) {
     DBQueryCtx query_ctx_1 = WPQsendQueryParams(connection, command_1, N1_PARAMS, paramTypes_1, paramValues_1, paramLengths_1, paramFormats_1, BINARY);
     connection = query_ctx_1.connection;
 
+    scratch_arena_data = connection->client.scratch_arena_data;
+    scratch_arena_raw = scratch_arena_data->arena;
+
     PGresult *result_1 = query_ctx_1.result;
     print_query_result(result_1);
+
+    params = parse_and_decode_params(scratch_arena_raw, body);
 
     char *password = find_value("password", params);
     char *stored_password = PQgetvalue(result_1, 0, 1); /* First row, Second column */
@@ -1298,6 +1457,8 @@ void login_create_session_post(Arena *scratch_arena_raw) {
     scratch_arena_data = connection->client.scratch_arena_data;
     scratch_arena_raw = scratch_arena_data->arena;
 
+    PQclear(result_1);
+
     PGresult *result_2 = query_ctx_2.result;
     print_query_result(result_2);
 
@@ -1315,12 +1476,36 @@ void login_create_session_post(Arena *scratch_arena_raw) {
             "HX-Redirect: /\r\n\r\n",
             session_id, expires_at);
 
+    PQclear(result_2);
+
     scratch_arena_raw->current = response + strlen(response) + 1;
 
+    /*
     if (SSL_write(ssl, response, strlen(response)) == -1) {
     }
+    */
 
-    SSL_free(ssl);
+    int ssl_ret = SSL_write(ssl, response, strlen(response));
+    if (ssl_ret <= 0) {
+        int ssl_err = SSL_get_error(ssl, ssl_ret);
+        if (ssl_err == SSL_ERROR_WANT_WRITE) {
+            /* Wait for the socket to be writable again */
+            event.events = EPOLLOUT | EPOLLET;
+            event.data.ptr = scratch_arena_data->client_socket_info;
+            assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_socket, &event) != -1);
+        } else {
+            printf("SSL write failed\n");
+            assert(0);
+        }
+    } else {
+        /* Successfully wrote the data, switch back to EPOLLIN to read more */
+        event.events = EPOLLIN | EPOLLET;
+        event.data.ptr = scratch_arena_data->client_socket_info;
+        assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_socket, &event) != -1);
+    }
+
+    /* SSL_shutdown(ssl); */
+    /* SSL_free(ssl); */
     close(client_socket);
 
     return;
@@ -1540,7 +1725,8 @@ void register_create_account_post(Arena *scratch_arena_raw) {
     if (SSL_write(ssl, response_headers, strlen((char *)response_headers)) == -1) {
     }
 
-    SSL_free(ssl);
+    /* SSL_shutdown(ssl); */
+    /* SSL_free(ssl); */
     close(client_socket);
 
     release_request_resources_and_exit(scratch_arena_raw, connection);
@@ -1575,8 +1761,8 @@ PGresult *get_result(DBConnection *connection) {
 
         if (PQresultStatus(ptr) != PGRES_TUPLES_OK && PQresultStatus(ptr) != PGRES_COMMAND_OK) {
             fprintf(stderr, "Query failed: %s\n", PQerrorMessage(connection->conn));
-            PQclear(ptr);
-            break;
+
+            assert(0);
         }
     }
 
@@ -1658,7 +1844,8 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
     if (SSL_write(ssl, response_headers, strlen((char *)response_headers)) == -1) {
     }
 
-    SSL_free(ssl);
+    /* SSL_shutdown(ssl); */
+    /* SSL_free(ssl); */
     close(scratch_arena_data->client_socket);
 
     uint8_t was_queued = connection->client.queued;
@@ -1751,7 +1938,8 @@ void public_get(Arena *scratch_arena_raw, String url) {
     if (SSL_write(ssl, response, strlen(response)) == -1) {
     }
 
-    SSL_free(ssl);
+    /* SSL_shutdown(ssl); */
+    /* SSL_free(ssl); */
     close(client_socket);
 
     arena_free(scratch_arena_raw);
@@ -2146,7 +2334,8 @@ void test_get(Arena *scratch_arena_raw) {
         /** TODO: Write error to logs */
     }
 
-    SSL_free(scratch_arena_data->ssl);
+    /* SSL_shutdown(scratch_arena_data->ssl); */
+    /* SSL_free(scratch_arena_data->ssl); */
 
     close(scratch_arena_data->client_socket);
     printf("Terminated - client-fd: %d\n", scratch_arena_data->client_socket);
@@ -2319,11 +2508,13 @@ void read_file(char **buffer, long *file_size, const char *absolute_file_path) {
     assert(*file_size != -1);
     rewind(file);
 
-    *buffer = (char *)malloc(*file_size * sizeof(char));
+    *buffer = (char *)malloc(*file_size * sizeof(char) + 1);
     assert(*buffer != NULL);
 
     size_t read_size = fread(*buffer, sizeof(char), *file_size, file);
     assert(read_size == (size_t)*file_size);
+
+    (*buffer)[*file_size] = '\0';
 
     fclose(file);
 }
@@ -2474,8 +2665,9 @@ String find_http_request_value(const char key[], char *request) {
 char *find_value(const char key[], Dict dict) {
     char *ptr = dict.start_addr;
     while (ptr < dict.end_addr) {
-        if (strncmp(ptr, key, strlen(key) + 1) == 0) { /** +1 to include null-terminator */
-            ptr += strlen(ptr) + 1;
+        /** Include null-terminator (+ 1) because key is a null-terminated string */
+        if (strncmp(ptr, key, strlen(key) + 1) == 0) {
+            ptr += strlen(ptr) + 1; /* Advance past key */
             return (ptr);
         }
 
@@ -2484,6 +2676,68 @@ char *find_value(const char key[], Dict dict) {
     }
 
     return NULL;
+}
+
+void replace_slashes(char *str) {
+    while (*str != '\0') {
+        if (*str == '/') {
+            *str = '\\'; /* Replace '/' with '\' */
+        }
+        str++;
+    }
+}
+
+void dump_dict(Dict dict, char dir_name[]) {
+    char cwd[KB(1)];
+    memset(cwd, 0, KB(1));
+
+    assert(getcwd(cwd, sizeof(cwd)) != NULL);
+
+    char memory_dir[] = "/memory";
+
+    assert((strlen(cwd) + strlen(memory_dir)) < KB(1));
+
+    memcpy(&(cwd[strlen(cwd)]), memory_dir, strlen(memory_dir));
+
+    /* Check if the directory exists */
+    if (access(cwd, F_OK) == -1) {
+        /* Directory doesn't exist, so create it */
+        assert(mkdir(cwd, 0755) == 0);
+    }
+
+    char slash[] = "/";
+    assert((strlen(cwd) + strlen(slash) + strlen(dir_name)) < KB(1));
+
+    memcpy(&(cwd[strlen(cwd)]), slash, strlen(slash));
+    memcpy(&(cwd[strlen(cwd)]), dir_name, strlen(dir_name));
+
+    char command[KB(2)];
+    sprintf(command, "rm -rf %s", cwd);
+    assert(system(command) == 0);
+    assert(mkdir(cwd, 0755) == 0);
+
+    char *ptr = dict.start_addr;
+    while (ptr < dict.end_addr) {
+        char *key = ptr;
+
+        char file_name[KB(2)];
+        memset(file_name, 0, KB(2));
+        sprintf(file_name, "%s/%s", cwd, key);
+
+        char *name = file_name + strlen(cwd) + strlen(slash);
+        replace_slashes(name);
+
+        FILE *file = fopen(file_name, "w");
+        assert(file);
+
+        ptr += strlen(ptr) + 1;
+        char *value = ptr;
+
+        fprintf(file, value);
+        ptr += strlen(ptr) + 1;
+
+        fclose(file);
+    }
 }
 
 Dict load_env_variables(const char *filepath) {
@@ -2496,14 +2750,17 @@ Dict load_env_variables(const char *filepath) {
     assert(file_size != 0);
 
     char *envs = (char *)p_global_arena_raw->current;
-    char *tmp_envs = envs;
+    char *p_dict_buffer = envs;
 
     char *line = file_content;
-    char *end = file_content + file_size;
+    char *end_of_file = file_content + file_size;
 
-    while (line < end) { /** Basic .env file parsing. */
-        uint8_t processed_key = 0;
-        uint8_t processed_value = 0;
+    while (line < end_of_file) { /** Basic .env file parsing. */
+        char *key = NULL;
+        boolean processed_key = false;
+
+        char *value = NULL;
+        boolean processed_value = false;
 
         char *c = line;
 
@@ -2515,7 +2772,7 @@ Dict load_env_variables(const char *filepath) {
         /** Skip comment line */
         if (*c == '#') {
             while (*c != '\n') {
-                if (c == end) {
+                if (c == end_of_file) {
                     goto end_of_line;
                 }
 
@@ -2527,7 +2784,7 @@ Dict load_env_variables(const char *filepath) {
 
         /** Skip whitespace characters at the beginning of the line */
         while (isspace(*c)) {
-            if (c == end) {
+            if (c == end_of_file) {
                 goto end_of_line;
             }
 
@@ -2536,29 +2793,32 @@ Dict load_env_variables(const char *filepath) {
 
         /** Start processing key */
         while (!(isspace(*c)) && *c != '=') {
-            if (c == end) {
+            if (c == end_of_file) {
                 /**
-                 * If we've reached the end of the file while processing
+                 * If we've reached the end_of_file of the file while processing
                  * the key, such variable does not have an associated value.
                  */
                 assert(0);
             }
 
             /** Copy key into memory buffer */
-            *tmp_envs = *c;
-            tmp_envs++;
+            *p_dict_buffer = *c;
+            if (!key) {
+                key = p_dict_buffer;
+            }
+            p_dict_buffer++;
 
             c++;
         }
 
-        *tmp_envs = '\0';
-        tmp_envs++;
+        *p_dict_buffer = '\0';
+        p_dict_buffer++;
 
-        processed_key = 1;
+        processed_key = true;
 
         /** Skip whitespace characters after key */
         while (isspace(*c)) {
-            if (c == end) {
+            if (c == end_of_file) {
                 goto end_of_line;
             }
 
@@ -2570,6 +2830,7 @@ Dict load_env_variables(const char *filepath) {
          * the key is the '=' after which comes the value.
          */
         if (*c != '=') {
+            printf("Env variable '%s' does not have a corresponding value.\n", key);
             assert(0);
         } else {
             /** Skip '=' character */
@@ -2578,7 +2839,7 @@ Dict load_env_variables(const char *filepath) {
 
         /** Skip whitespace characters after '=' */
         while (isspace(*c)) {
-            if (c == end) {
+            if (c == end_of_file) {
                 goto end_of_line;
             }
 
@@ -2586,36 +2847,34 @@ Dict load_env_variables(const char *filepath) {
         }
 
         /** From here we start processing value */
-        uint8_t processing_value = 0;
         while (!(isspace(*c))) {
-            if ((*c) != '\0') {
-                processing_value = 1;
-            }
-
-            if (c == end) {
-                /** Reached the end of the file while processing the value */
-                if (processing_value) {
-                    processed_value = 1;
+            if (c == end_of_file) {
+                if (value) {
+                    printf("WARNING: EOF reached while processing value '%s' for key '%s'. Ensure value '%s' is as intended.\n", value, key, value);
+                    processed_value = true;
                 }
 
                 goto end_of_line;
             }
 
             /** Copy value into memory buffer */
-            *tmp_envs = *c;
-            tmp_envs++;
+            *p_dict_buffer = *c;
+            if (!value) {
+                value = p_dict_buffer;
+            }
+            p_dict_buffer++;
 
             c++;
         }
 
-        *tmp_envs = '\0';
-        tmp_envs++;
+        *p_dict_buffer = '\0';
+        p_dict_buffer++;
 
-        processed_value = 1;
+        processed_value = true;
 
         /** Skip all character after the value and proceed to next line */
         while (*c != '\n') {
-            if (c == end) {
+            if (c == end_of_file) {
                 goto end_of_line;
             }
 
@@ -2625,7 +2884,7 @@ Dict load_env_variables(const char *filepath) {
     end_of_line:
         line = c + 1;
 
-        if ((processed_key == 0) != (processed_value == 0)) {
+        if ((processed_key == false) != (processed_value == false)) {
             /**
              * Key and value must be processed together.
              * One should not be processed without the other.
@@ -2633,17 +2892,18 @@ Dict load_env_variables(const char *filepath) {
             assert(0);
         }
 
-        processed_key = 0;
-        processed_value = 0;
+        processed_key = false;
+        processed_value = false;
     }
 
-    Dict envs_dict = {0};
-    envs_dict.start_addr = envs;
-    envs_dict.end_addr = tmp_envs;
-    p_global_arena_raw->current = envs_dict.end_addr + 1;
+    p_global_arena_raw->current = p_dict_buffer + 1;
 
     free(file_content);
     file_content = NULL;
+
+    Dict envs_dict = {0};
+    envs_dict.start_addr = envs;
+    envs_dict.end_addr = p_dict_buffer;
 
     return envs_dict;
 }
@@ -2954,7 +3214,7 @@ Dict load_templates(const char *base_path) {
                             size_t component_markdown_length = strlen(tmp_components_j);
 
                             size_t len = strlen(tmp_templates_dict + import_statement_length);
-                            memmove(tmp_templates_dict + component_markdown_length, tmp_templates_dict + import_statement_length, len); /* ATTENTION! */
+                            memmove(tmp_templates_dict + component_markdown_length, tmp_templates_dict + import_statement_length, len);
                             char *ptr = tmp_templates_dict + component_markdown_length + len;
                             ptr[0] = '\0';
                             ptr++;
@@ -3223,4 +3483,21 @@ void release_request_resources_and_exit(Arena *scratch_arena_raw, DBConnection *
     }
 
     longjmp(ctx, 1);
+}
+
+void sigint_handler(int signo) {
+    if (signo == SIGINT) {
+        printf("\nReceived SIGINT, exiting program...\n");
+        keep_running = 0;
+    }
+}
+
+void print_ssl_error(SSL *ssl, int ssl_ret) {
+    int ssl_err = SSL_get_error(ssl, ssl_ret);
+    char error_buffer[120];
+
+    ERR_error_string_n(ssl_err, error_buffer, sizeof(error_buffer));
+    printf("SSL error: %s\n", error_buffer);
+
+    ERR_print_errors_fp(stderr);
 }

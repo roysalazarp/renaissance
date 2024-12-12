@@ -14,6 +14,7 @@
         "tuple": "c",
         "utility": "c",
         "rand.h": "c",
-        "uuid.h": "c"
+        "uuid.h": "c",
+        "*.tcc": "c"
     }
 }

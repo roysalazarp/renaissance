@@ -11,5 +11,6 @@ RUN apt-get install -y \
     postgresql-contrib \
     libpq-dev \
     uuid-dev \
+    valgrind \
     gdb \
     && apt-get clean
