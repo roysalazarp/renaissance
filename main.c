@@ -8,9 +8,6 @@
 #include <libpq-fe.h>
 #include <linux/limits.h>
 #include <netinet/in.h>
-#include <openssl/err.h>
-#include <openssl/rand.h>
-#include <openssl/ssl.h>
 #include <regex.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -166,11 +163,8 @@ typedef struct {
 
 typedef struct {
     Arena *arena;
-    SSL *ssl;
     int client_socket;
-    Socket *client_socket_info;
     char *request;
-    char *response;
 } ScratchArenaDataLookup;
 
 typedef struct {
@@ -206,7 +200,6 @@ typedef struct {
 /** Server setup */
 
 Socket *create_server_socket(uint16_t port);
-void print_ssl_error(SSL *ssl, int ssl_ret);
 
 /** Arena */
 
@@ -378,20 +371,6 @@ int main() {
     event.data.ptr = server_socket;
     assert(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) != -1);
 
-    const char *crt_path = find_value("COMPILE_CRT_PATH", envs);
-    const char *crt_key_path = find_value("COMPILE_CRT_KEY_PATH", envs);
-    const char *crt_ca_path = find_value("COMPILE_CRT_CA_PATH", envs);
-
-    SSL_library_init();
-    OpenSSL_add_all_algorithms();
-    SSL_load_error_strings();
-    SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_server_method());
-    assert(ssl_ctx != NULL);
-    assert(SSL_CTX_use_certificate_file(ssl_ctx, crt_path, SSL_FILETYPE_PEM) > 0);
-    assert(SSL_CTX_use_PrivateKey_file(ssl_ctx, crt_key_path, SSL_FILETYPE_PEM) > 0);
-    assert(SSL_CTX_load_verify_locations(ssl_ctx, crt_ca_path, NULL) > 0);
-    assert(SSL_CTX_check_private_key(ssl_ctx));
-
     printf("Server listening on port: %d...\n", (int)port);
 
     create_connection_pool(envs);
@@ -433,30 +412,6 @@ int main() {
                         ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)arena_alloc(scratch_arena_raw, sizeof(ScratchArenaDataLookup));
                         scratch_arena_data->arena = scratch_arena_raw;
                         scratch_arena_data->client_socket = client_fd;
-                        scratch_arena_data->client_socket_info = client_socket_info;
-
-                        SSL *ssl = SSL_new(ssl_ctx);
-                        assert(ssl);
-
-                        scratch_arena_data->ssl = ssl;
-                        SSL_set_fd(ssl, client_fd);
-
-                        /* Start SSL handshake */
-                        int ssl_ret = SSL_accept(ssl);
-                        if (ssl_ret <= 0) {
-                            int ssl_err = SSL_get_error(ssl, ssl_ret);
-                            if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
-                                /* SSL handshake needs more data, wait for events */
-                                goto continue_later;
-                            } else {
-                                /* Handle other SSL errors (handshake failure) */
-                                printf("SSL handshake failed\n");
-                                assert(0);
-                            }
-                        }
-
-                    continue_later:
-                        printf("\n");
 
                         event.events = EPOLLIN | EPOLLET;
                         event.data.ptr = client_socket_info;
@@ -474,36 +429,6 @@ int main() {
                 case CLIENT_SOCKET: { /** Client socket (aka. client request) ready for read */
                     if (events[i].events & EPOLLIN) {
                         Arena *scratch_arena_raw = (Arena *)((uint8_t *)socket_info - sizeof(Arena));
-                        ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
-
-                        SSL *ssl = scratch_arena_data->ssl;
-                        int client_fd = scratch_arena_data->client_socket;
-                        Socket *client_socket_info = scratch_arena_data->client_socket_info;
-
-                        int ssl_ret = SSL_accept(ssl);
-                        if (ssl_ret <= 0) {
-                            int ssl_err = SSL_get_error(ssl, ssl_ret);
-
-                            if (ssl_err == SSL_ERROR_WANT_READ) {
-                                /* The handshake needs more data from the client (waiting for read) */
-                                event.events = EPOLLIN | EPOLLET;
-                                event.data.ptr = client_socket_info;
-                                assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_fd, &event) != -1);
-
-                                continue; /* Wait for the next event when the socket is ready to read */
-                            } else if (ssl_err == SSL_ERROR_WANT_WRITE) {
-                                /* The handshake needs to send more data to the client (waiting for write) */
-                                event.events = EPOLLOUT | EPOLLET; /* Wait for the socket to be writable */
-                                event.data.ptr = client_socket_info;
-                                assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_fd, &event) != -1);
-
-                                continue; /* Wait for the next event when the socket is ready to write */
-                            } else {
-                                /* Handle other SSL errors (e.g., fatal errors) */
-                                printf("SSL handshake failed\n");
-                                assert(0);
-                            }
-                        }
 
                         if (setjmp(ctx) == 0) {
                             router(scratch_arena_raw);
@@ -568,7 +493,6 @@ int main() {
         }
     }
 
-    SSL_CTX_free(ssl_ctx);
     close(server_fd);
 
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
@@ -583,7 +507,7 @@ int main() {
 void router(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
-    SSL *ssl = scratch_arena_data->ssl;
+    int client_socket = scratch_arena_data->client_socket;
 
     char *request = (char *)scratch_arena_raw->current;
     scratch_arena_data->request = scratch_arena_raw->current;
@@ -602,15 +526,15 @@ void router(Arena *scratch_arena_raw) {
     while (1) {
         char *advanced_request_ptr = tmp_request + read_stream;
 
-        ssize_t incomming_stream_size = SSL_read(ssl, advanced_request_ptr, buffer_size - read_stream);
+        ssize_t incomming_stream_size = recv(client_socket, advanced_request_ptr, buffer_size - read_stream, 0);
+        if (incomming_stream_size == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (read_stream > 0) {
+                    break;
+                }
 
-        int ssl_error = SSL_get_error(ssl, incomming_stream_size);
-        if (ssl_error == SSL_ERROR_WANT_READ) {
-            if (read_stream > 0) {
-                break;
+                longjmp(ctx, 1);
             }
-
-            longjmp(ctx, 1);
         }
 
         if (incomming_stream_size <= 0) {
@@ -1039,7 +963,6 @@ void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params
     }
 
     int client_socket = scratch_arena_data->client_socket;
-    SSL *ssl = scratch_arena_data->ssl;
 
     char *template = find_value(view, p_global_arena_data->templates);
 
@@ -1072,11 +995,9 @@ void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params
     sprintf(response, "%s%s", response_headers, template);
     response[response_length] = '\0';
 
-    if (SSL_write(ssl, response, strlen(response)) == -1) {
+    if (send(client_socket, response, strlen(response), 0) == -1) {
     }
 
-    /* SSL_shutdown(ssl); */
-    /* SSL_free(ssl); */
     close(client_socket);
 
     arena_free(scratch_arena_raw);
@@ -1356,45 +1277,13 @@ void home_get(Arena *scratch_arena_raw) {
     sprintf(response, "%s%s", response_headers, template_cpy);
     response[response_length] = '\0';
 
-    int client_socket = scratch_arena_data->client_socket;
-    SSL *ssl = scratch_arena_data->ssl;
-
-    /** BUG: https://linux.die.net/man/3/ssl_write#:~:text=If%20the%20underlying%20BIO%20is%20non,BIO%20before%20being%20able%20to%20continue. */
-    /*
-    if (SSL_write(ssl, response, strlen(response)) == -1) {
-    }
-    */
-
 send_response:
-    printf("\n");
-
-    int ssl_ret = SSL_write(ssl, response, strlen(response));
-    if (ssl_ret <= 0) {
-        int ssl_err = SSL_get_error(ssl, ssl_ret);
-        if (ssl_err == SSL_ERROR_WANT_WRITE) {
-            /* Wait for the socket to be writable again */
-            event.events = EPOLLOUT | EPOLLET;
-            event.data.ptr = scratch_arena_data->client_socket_info;
-            assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_socket, &event) != -1);
-        } else if (ssl_err == SSL_ERROR_WANT_READ) {
-            printf("SSL_ERROR_WANT_READ\n");
-        } else {
-            print_ssl_error(ssl, ssl_ret);
-
-            assert(0);
-        }
-    } else {
-        /* Successfully wrote the data, switch back to EPOLLIN to read more */
-        event.events = EPOLLIN | EPOLLET;
-        event.data.ptr = scratch_arena_data->client_socket_info;
-        assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_socket, &event) != -1);
+    if (send(scratch_arena_data->client_socket, response, strlen(response), 0) == -1) {
     }
 
-    /* SSL_shutdown(ssl); */
-    /* SSL_free(ssl); */
-    close(client_socket);
+    close(scratch_arena_data->client_socket);
 
-    return;
+    release_request_resources_and_exit(scratch_arena_raw, connection);
 }
 
 void login_create_session_post(Arena *scratch_arena_raw) {
@@ -1462,9 +1351,6 @@ void login_create_session_post(Arena *scratch_arena_raw) {
     PGresult *result_2 = query_ctx_2.result;
     print_query_result(result_2);
 
-    int client_socket = scratch_arena_data->client_socket;
-    SSL *ssl = scratch_arena_data->ssl;
-
     char *response = (char *)scratch_arena_raw->current;
 
     char *session_id = PQgetvalue(result_2, 0, 0);
@@ -1480,35 +1366,12 @@ void login_create_session_post(Arena *scratch_arena_raw) {
 
     scratch_arena_raw->current = response + strlen(response) + 1;
 
-    /*
-    if (SSL_write(ssl, response, strlen(response)) == -1) {
-    }
-    */
-
-    int ssl_ret = SSL_write(ssl, response, strlen(response));
-    if (ssl_ret <= 0) {
-        int ssl_err = SSL_get_error(ssl, ssl_ret);
-        if (ssl_err == SSL_ERROR_WANT_WRITE) {
-            /* Wait for the socket to be writable again */
-            event.events = EPOLLOUT | EPOLLET;
-            event.data.ptr = scratch_arena_data->client_socket_info;
-            assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_socket, &event) != -1);
-        } else {
-            printf("SSL write failed\n");
-            assert(0);
-        }
-    } else {
-        /* Successfully wrote the data, switch back to EPOLLIN to read more */
-        event.events = EPOLLIN | EPOLLET;
-        event.data.ptr = scratch_arena_data->client_socket_info;
-        assert(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_socket, &event) != -1);
+    if (send(scratch_arena_data->client_socket, response, strlen(response), 0) == -1) {
     }
 
-    /* SSL_shutdown(ssl); */
-    /* SSL_free(ssl); */
-    close(client_socket);
+    close(scratch_arena_data->client_socket);
 
-    return;
+    release_request_resources_and_exit(scratch_arena_raw, connection);
 }
 
 int generate_salt(uint8_t *salt, size_t salt_size) {
@@ -1720,13 +1583,9 @@ void register_create_account_post(Arena *scratch_arena_raw) {
     char response_headers[] = "HTTP/1.1 200 OK\r\nHX-Redirect: /\r\n\r\n";
 
     int client_socket = scratch_arena_data->client_socket;
-    SSL *ssl = scratch_arena_data->ssl;
-
-    if (SSL_write(ssl, response_headers, strlen((char *)response_headers)) == -1) {
+    if (send(client_socket, response_headers, strlen((char *)response_headers), 0) == -1) {
     }
 
-    /* SSL_shutdown(ssl); */
-    /* SSL_free(ssl); */
     close(client_socket);
 
     release_request_resources_and_exit(scratch_arena_raw, connection);
@@ -1839,14 +1698,11 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
         sprintf((char *)response_headers, "HTTP/1.1 200 OK\r\nHX-Redirect: /register?email=%.*s\r\n\r\n", (int)encoded_email.length, encoded_email.start_addr);
     }
 
-    SSL *ssl = scratch_arena_data->ssl;
-
-    if (SSL_write(ssl, response_headers, strlen((char *)response_headers)) == -1) {
+    int client_socket = scratch_arena_data->client_socket;
+    if (send(client_socket, response_headers, strlen((char *)response_headers), 0) == -1) {
     }
 
-    /* SSL_shutdown(ssl); */
-    /* SSL_free(ssl); */
-    close(scratch_arena_data->client_socket);
+    close(client_socket);
 
     uint8_t was_queued = connection->client.queued;
 
@@ -1907,9 +1763,6 @@ void public_get(Arena *scratch_arena_raw, String url) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
     GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
-    int client_socket = scratch_arena_data->client_socket;
-    SSL *ssl = scratch_arena_data->ssl;
-
     char *path = (char *)arena_alloc(scratch_arena_raw, sizeof('.') + url.length);
     char *tmp_path = path;
     *tmp_path = '.';
@@ -1920,7 +1773,6 @@ void public_get(Arena *scratch_arena_raw, String url) {
     char *content = find_value(path, p_global_arena_data->public_files_dict);
 
     char *response = (char *)scratch_arena_raw->current;
-    scratch_arena_data->response = response;
 
     sprintf(response,
             "HTTP/1.1 200 OK\r\n"
@@ -1935,11 +1787,10 @@ void public_get(Arena *scratch_arena_raw, String url) {
 
     scratch_arena_raw->current = response_end + 1;
 
-    if (SSL_write(ssl, response, strlen(response)) == -1) {
+    int client_socket = scratch_arena_data->client_socket;
+    if (send(client_socket, response, strlen(response), 0) == -1) {
     }
 
-    /* SSL_shutdown(ssl); */
-    /* SSL_free(ssl); */
     close(client_socket);
 
     arena_free(scratch_arena_raw);
@@ -2329,10 +2180,11 @@ void test_get(Arena *scratch_arena_raw) {
     sprintf(response, "%s%s", response_headers, template_cpy);
     response[response_length] = '\0';
 
-    int resl = SSL_write(scratch_arena_data->ssl, response, strlen(response));
-    if (resl == -1) {
-        /** TODO: Write error to logs */
+    int client_socket = scratch_arena_data->client_socket;
+    if (send(client_socket, response, strlen(response), 0) == -1) {
     }
+
+    close(client_socket);
 
     /* SSL_shutdown(scratch_arena_data->ssl); */
     /* SSL_free(scratch_arena_data->ssl); */
@@ -2733,7 +2585,7 @@ void dump_dict(Dict dict, char dir_name[]) {
         ptr += strlen(ptr) + 1;
         char *value = ptr;
 
-        fprintf(file, value);
+        fprintf(file, "%s", value);
         ptr += strlen(ptr) + 1;
 
         fclose(file);
@@ -3490,14 +3342,4 @@ void sigint_handler(int signo) {
         printf("\nReceived SIGINT, exiting program...\n");
         keep_running = 0;
     }
-}
-
-void print_ssl_error(SSL *ssl, int ssl_ret) {
-    int ssl_err = SSL_get_error(ssl, ssl_ret);
-    char error_buffer[120];
-
-    ERR_error_string_n(ssl_err, error_buffer, sizeof(error_buffer));
-    printf("SSL error: %s\n", error_buffer);
-
-    ERR_print_errors_fp(stderr);
 }
