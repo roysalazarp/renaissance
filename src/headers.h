@@ -275,8 +275,8 @@ void dump_dict(Dict dict, char folder_name[]);
 extern DBConnection connection_pool[CONNECTION_POOL_SIZE];
 extern QueuedRequest queue[MAX_CLIENT_CONNECTIONS];
 
-extern Arena *_p_global_arena_raw;
-extern GlobalArenaDataLookup *_p_global_arena_data;
+extern Arena *global_arena_raw;
+extern GlobalArenaDataLookup *global_arena_data;
 
 extern int epoll_fd;
 extern int nfds;

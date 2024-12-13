@@ -209,7 +209,6 @@ void router(Arena *scratch_arena_raw) {
 
 void public_get(Arena *scratch_arena_raw, String url) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
 
     char *path = (char *)arena_alloc(scratch_arena_raw, sizeof('.') + url.length);
     char *tmp_path = path;
@@ -218,7 +217,7 @@ void public_get(Arena *scratch_arena_raw, String url) {
     strncpy(tmp_path, url.start_addr, url.length);
 
     char *public_file_type = file_content_type(scratch_arena_raw, path);
-    char *content = find_value(path, p_global_arena_data->public_files_dict);
+    char *content = find_value(path, global_arena_data->public_files_dict);
 
     char *response = (char *)scratch_arena_raw->current;
 
@@ -250,7 +249,6 @@ void public_get(Arena *scratch_arena_raw, String url) {
  * rendered in their respective template placeholders.
  */
 void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params) {
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     Dict replaces = {0};
@@ -264,7 +262,7 @@ void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params
 
     int client_socket = scratch_arena_data->client_socket;
 
-    char *template = find_value(view, p_global_arena_data->templates);
+    char *template = find_value(view, global_arena_data->templates);
 
     if (replaces.start_addr) {
         char *template_cpy = (char *)scratch_arena_raw->current;
@@ -351,10 +349,8 @@ void test_get(Arena *scratch_arena_raw) {
     print_query_result(result);
     PQclear(result);
 
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
-
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-    char *template = find_value("test", p_global_arena_data->templates);
+    char *template = find_value("test", global_arena_data->templates);
 
     char *template_cpy = (char *)scratch_arena_raw->current;
 
@@ -448,7 +444,7 @@ void home_get(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
     DBConnection *connection = get_available_connection(scratch_arena_raw);
 
-    char *template = find_value("home", _p_global_arena_data->templates);
+    char *template = find_value("home", global_arena_data->templates);
 
     char *response = NULL;
 

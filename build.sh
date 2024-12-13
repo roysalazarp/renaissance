@@ -63,9 +63,9 @@ else
     exit 1
 fi
 
-set -o allexport && source <(grep '^COMPILE_' ".env.$BUILD_ENV") && set +o allexport
+set -o allexport && source <(grep '^CMPL__' ".env.$BUILD_ENV") && set +o allexport
 
-for var in $(env | grep '^COMPILE_' | cut -d= -f1); do
+for var in $(env | grep '^CMPL__' | cut -d= -f1); do
     source="${!var}"  # Get the value of the environment variable
     if [ -d "$source" ]; then
         # If the source exists, copy it to $BUILD_DIR

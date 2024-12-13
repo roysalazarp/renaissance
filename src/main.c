@@ -3,8 +3,8 @@
 DBConnection connection_pool[CONNECTION_POOL_SIZE];
 QueuedRequest queue[MAX_CLIENT_CONNECTIONS];
 
-Arena *_p_global_arena_raw;
-GlobalArenaDataLookup *_p_global_arena_data;
+Arena *global_arena_raw;
+GlobalArenaDataLookup *global_arena_data;
 
 int epoll_fd;
 int nfds;
@@ -20,26 +20,26 @@ int main() {
     int i;
 
     /**
-     * Registers a signal handler for SIGINT (to terminate the process)
-     * to exit the program gracefully for Valgrind to show the program report.
+     * Registers a signal handler to ensure the program exits gracefully.
+     * This allows Valgrind to generate a complete memory report upon termination.
      */
     if (signal(SIGINT, sigint_handler) == SIG_ERR) {
         fprintf(stderr, "Failed to set up signal handler for SIGINT\nError code: %d\n", errno);
         assert(0);
     }
 
-    _p_global_arena_raw = arena_init(PAGE_SIZE * 50);
+    global_arena_raw = arena_init(PAGE_SIZE * 50);
 
     /** To look up data stored in arena */
-    _p_global_arena_data = (GlobalArenaDataLookup *)arena_alloc(_p_global_arena_raw, sizeof(GlobalArenaDataLookup));
+    global_arena_data = (GlobalArenaDataLookup *)arena_alloc(global_arena_raw, sizeof(GlobalArenaDataLookup));
 
     Dict envs = load_env_variables(ENV_FILE_PATH);
 
-    const char *public_base_path = find_value("COMPILE_PUBLIC_FOLDER", envs);
+    const char *public_base_path = find_value("CMPL__PUBLIC_FOLDER", envs);
     load_public_files(public_base_path);
 
-    const char *html_base_path = find_value("COMPILE_TEMPLATES_FOLDER", envs);
-    load_templates(html_base_path); /** TODO: Review the code inside this function */
+    const char *html_base_path = find_value("CMPL__TEMPLATES_FOLDER", envs);
+    load_templates(html_base_path);
 
     epoll_fd = epoll_create1(0);
     assert(epoll_fd != -1);
@@ -75,7 +75,6 @@ int main() {
         nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, BLOCK_EXECUTION);
 
         if (keep_running == 0) {
-            printf("breaking out\n");
             break;
         }
 
@@ -189,15 +188,12 @@ int main() {
         PQfinish(connection_pool[i].conn);
     }
 
-    arena_free(_p_global_arena_raw);
+    arena_free(global_arena_raw);
 
     return 0;
 }
 
 Socket *create_server_socket(uint16_t port) {
-    Arena *p_global_arena_raw = _p_global_arena_raw;
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
-
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     assert(server_fd != -1);
 
@@ -217,13 +213,13 @@ Socket *create_server_socket(uint16_t port) {
 
     assert(listen(server_fd, MAX_CLIENT_CONNECTIONS) != -1);
 
-    Socket *server_socket = arena_alloc(p_global_arena_raw, sizeof(Socket));
+    Socket *server_socket = arena_alloc(global_arena_raw, sizeof(Socket));
     server_socket->fd = server_fd;
     server_socket->type = SERVER_SOCKET;
 
-    p_global_arena_data->socket = server_socket;
+    global_arena_data->socket = server_socket;
 
-    return p_global_arena_data->socket;
+    return global_arena_data->socket;
 }
 
 void sigint_handler(int signo) {

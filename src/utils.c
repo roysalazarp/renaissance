@@ -1,15 +1,13 @@
 #include "headers.h"
 
 Dict load_env_variables(const char *filepath) {
-    Arena *p_global_arena_raw = _p_global_arena_raw;
-
     char *file_content = NULL;
     long file_size = 0;
     read_file(&file_content, &file_size, filepath);
 
     assert(file_size != 0);
 
-    char *envs = (char *)p_global_arena_raw->current;
+    char *envs = (char *)global_arena_raw->current;
     char *p_dict_buffer = envs;
 
     char *line = file_content;
@@ -156,7 +154,7 @@ Dict load_env_variables(const char *filepath) {
         processed_value = false;
     }
 
-    p_global_arena_raw->current = p_dict_buffer + 1;
+    global_arena_raw->current = p_dict_buffer + 1;
 
     free(file_content);
     file_content = NULL;
