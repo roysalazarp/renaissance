@@ -265,6 +265,32 @@ uint8_t get_dict_size(Dict dict);
 void sigint_handler(int signo);
 void dump_dict(Dict dict, char folder_name[]);
 
+typedef struct {
+    void *stack_ptr;
+    size_t stack_size;
+    char *stack_buffer;
+} Stack;
+
+void save_stack_state(Stack stack);
+void restore_stack_state(Stack stack);
+
+#define DECLARE_STACK_MARKER char __top__ = 't'
+
+#define SAVE_STACK_STATE(stack)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        \
+    do {                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               \
+        char __bottom__ = 'b';                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         \
+        stack.stack_size = (size_t) & __top__ - (size_t) & __bottom__;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 \
+        stack.stack_ptr = (void *)&__top__;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            \
+        save_stack_state(stack);                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       \
+    } while (0);
+
+#define RESTORE_STACK_STATE(stack, result, expr)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       \
+    do {                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               \
+        SAVE_STACK_STATE(stack);                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       \
+        result = (expr);                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               \
+        restore_stack_state(stack);                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    \
+    } while (0);
+
 /*
 +-----------------------------------------------------------------------------------+
 |                                     globals                                       |
@@ -344,12 +370,8 @@ int main() {
     const char *public_base_path = find_value("COMPILE_PUBLIC_FOLDER", envs);
     load_public_files(public_base_path);
 
-    dump_dict(_p_global_arena_data->public_files_dict, "public_files_dict");
-
     const char *html_base_path = find_value("COMPILE_TEMPLATES_FOLDER", envs);
     load_templates(html_base_path); /** TODO: Review the code inside this function */
-
-    dump_dict(_p_global_arena_data->templates, "templates");
 
     epoll_fd = epoll_create1(0);
     assert(epoll_fd != -1);
@@ -1054,7 +1076,12 @@ DBConnection *get_available_connection(Arena *scratch_arena_raw) {
     assert(0);
 }
 
+Stack WPQsendQueryParamsStackBuffer;
 DBQueryCtx WPQsendQueryParams(DBConnection *connection, const char *command, int nParams, const Oid *paramTypes, const char *const *paramValues, const int *paramLengths, const int *paramFormats, int resultFormat) {
+    /*
+    DECLARE_STACK_MARKER;
+    */
+
     if (PQsendQueryParams(connection->conn, command, nParams, paramTypes, paramValues, paramLengths, paramFormats, resultFormat) == 0) {
         fprintf(stderr, "Query failed to send: %s\n", PQerrorMessage(connection->conn));
         int conn_fd = PQsocket(connection->conn);
@@ -1068,6 +1095,9 @@ DBQueryCtx WPQsendQueryParams(DBConnection *connection, const char *command, int
     epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_fd, &event);
 
     int index;
+    /*
+    SAVE_STACK_STATE(WPQsendQueryParamsStackBuffer);
+    */
     if (connection->client.queued) {
         int r = setjmp(connection->client.jmp_buf);
         if (r == 0) {
@@ -1084,7 +1114,11 @@ DBQueryCtx WPQsendQueryParams(DBConnection *connection, const char *command, int
         index = from_index(r);
     }
 
-    connection = &connection_pool[index];
+    /*
+    restore_stack_state(WPQsendQueryParamsStackBuffer);
+    */
+
+    printf("%d\n", index);
 
     PGresult *result = get_result(connection);
 
@@ -1147,6 +1181,7 @@ String find_cookie_value(const char *key, String cookies) {
     return value;
 }
 
+Stack is_authenticated_stack_buffer;
 User is_authenticated(Arena *scratch_arena_raw, DBConnection *connection) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
@@ -1157,10 +1192,12 @@ User is_authenticated(Arena *scratch_arena_raw, DBConnection *connection) {
         String session_id_reference = find_cookie_value("session_id", cookie);
         if (session_id_reference.start_addr && session_id_reference.length) {
             uuid_str_t session_id_str;
+            memset(session_id_str, 0, sizeof(uuid_str_t));
             memcpy(session_id_str, session_id_reference.start_addr, session_id_reference.length);
             session_id_str[session_id_reference.length] = '\0';
 
             uuid_t session_id;
+            memset(session_id, 0, sizeof(uuid_t));
             uuid_parse(session_id_str, session_id);
 
             const char *command_1 = "SELECT u.id, u.email "
@@ -1175,11 +1212,6 @@ User is_authenticated(Arena *scratch_arena_raw, DBConnection *connection) {
             int paramFormats_1[N1_PARAMS] = {1};
 
             DBQueryCtx query_ctx_1 = WPQsendQueryParams(connection, command_1, N1_PARAMS, paramTypes_1, paramValues_1, paramLengths_1, paramFormats_1, TEXT);
-            connection = query_ctx_1.connection;
-
-            scratch_arena_data = connection->client.scratch_arena_data;
-            scratch_arena_raw = scratch_arena_data->arena;
-
             PGresult *result_1 = query_ctx_1.result;
 
             int num_rows = PQntuples(result_1);
@@ -1225,18 +1257,18 @@ User is_authenticated(Arena *scratch_arena_raw, DBConnection *connection) {
     return user;
 }
 
+Stack home_get_stack_buffer;
 void home_get(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+    /*
+    DECLARE_STACK_MARKER;
+    */
 
+    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
     DBConnection *connection = get_available_connection(scratch_arena_raw);
 
-    scratch_arena_data = connection->client.scratch_arena_data;
-    scratch_arena_raw = scratch_arena_data->arena;
+    char *template = find_value("home", _p_global_arena_data->templates);
 
-    GlobalArenaDataLookup *p_global_arena_data = _p_global_arena_data;
-    char *template = find_value("home", p_global_arena_data->templates);
-
-    char *response;
+    char *response = NULL;
 
     User user = is_authenticated(scratch_arena_raw, connection);
     if (user.start_addr) {
@@ -1291,9 +1323,6 @@ void login_create_session_post(Arena *scratch_arena_raw) {
 
     DBConnection *connection = get_available_connection(scratch_arena_raw);
 
-    scratch_arena_data = connection->client.scratch_arena_data;
-    scratch_arena_raw = scratch_arena_data->arena;
-
     String body = find_body(scratch_arena_data->request);
     Dict params = parse_and_decode_params(scratch_arena_raw, body);
 
@@ -1308,15 +1337,9 @@ void login_create_session_post(Arena *scratch_arena_raw) {
     int paramFormats_1[N1_PARAMS] = {0};
 
     DBQueryCtx query_ctx_1 = WPQsendQueryParams(connection, command_1, N1_PARAMS, paramTypes_1, paramValues_1, paramLengths_1, paramFormats_1, BINARY);
-    connection = query_ctx_1.connection;
-
-    scratch_arena_data = connection->client.scratch_arena_data;
-    scratch_arena_raw = scratch_arena_data->arena;
 
     PGresult *result_1 = query_ctx_1.result;
     print_query_result(result_1);
-
-    params = parse_and_decode_params(scratch_arena_raw, body);
 
     char *password = find_value("password", params);
     char *stored_password = PQgetvalue(result_1, 0, 1); /* First row, Second column */
@@ -1341,10 +1364,6 @@ void login_create_session_post(Arena *scratch_arena_raw) {
     int paramFormats_2[N1_PARAMS] = {1};
 
     DBQueryCtx query_ctx_2 = WPQsendQueryParams(connection, command_2, N1_PARAMS, paramTypes_2, paramValues_2, paramLengths_2, paramFormats_2, TEXT);
-    connection = query_ctx_2.connection;
-
-    scratch_arena_data = connection->client.scratch_arena_data;
-    scratch_arena_raw = scratch_arena_data->arena;
 
     PQclear(result_1);
 
@@ -1481,9 +1500,6 @@ void register_create_account_post(Arena *scratch_arena_raw) {
 
     DBConnection *connection = get_available_connection(scratch_arena_raw);
 
-    scratch_arena_data = connection->client.scratch_arena_data;
-    scratch_arena_raw = scratch_arena_data->arena;
-
     String body = find_body(scratch_arena_data->request);
     Dict params = parse_and_decode_params(scratch_arena_raw, body);
 
@@ -1571,10 +1587,7 @@ void register_create_account_post(Arena *scratch_arena_raw) {
         index = from_index(r);
     }
 
-    scratch_arena_data = connection_pool[index].client.scratch_arena_data;
-    scratch_arena_raw = scratch_arena_data->arena;
-
-    connection = &(connection_pool[index]);
+    printf("%d", index);
 
     PGresult *result = get_result(connection);
     print_query_result(result);
@@ -1608,9 +1621,9 @@ PGresult *get_result(DBConnection *connection) {
         }
     }
 
-    PGresult *result;
+    PGresult *result = NULL;
 
-    PGresult *ptr;
+    PGresult *ptr = NULL;
     int did_set_ptr = 0;
     while ((ptr = PQgetResult(connection->conn)) != NULL) {
         if (did_set_ptr == 0) {
@@ -1632,9 +1645,6 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
     ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
 
     DBConnection *connection = get_available_connection(scratch_arena_raw);
-
-    scratch_arena_data = connection->client.scratch_arena_data;
-    scratch_arena_raw = scratch_arena_data->arena;
 
     String body = find_body(scratch_arena_data->request);
     Dict params = parse_and_decode_params(scratch_arena_raw, body);
@@ -1676,10 +1686,7 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
         index = from_index(r);
     }
 
-    scratch_arena_data = connection_pool[index].client.scratch_arena_data;
-    scratch_arena_raw = scratch_arena_data->arena;
-
-    connection = &(connection_pool[index]);
+    printf("%d", index);
 
     PGresult *result = get_result(connection);
 
@@ -1688,8 +1695,8 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
     PQclear(result);
 
     char *response_headers[200];
+    memset(response_headers, 0, sizeof(response_headers));
 
-    body = find_body(scratch_arena_data->request);
     String encoded_email = find_body_value("email", body);
 
     if (rows > 0) {
@@ -2109,6 +2116,8 @@ void test_get(Arena *scratch_arena_raw) {
 
         index = from_index(r);
     }
+
+    printf("%d", index);
 
     scratch_arena_data = connection_pool[index].client.scratch_arena_data;
     scratch_arena_raw = scratch_arena_data->arena;
@@ -3341,5 +3350,18 @@ void sigint_handler(int signo) {
     if (signo == SIGINT) {
         printf("\nReceived SIGINT, exiting program...\n");
         keep_running = 0;
+    }
+}
+
+void save_stack_state(Stack stack) {
+    stack.stack_buffer = (char *)malloc(stack.stack_size);
+    if (stack.stack_buffer) {
+        memcpy(stack.stack_buffer, stack.stack_ptr, stack.stack_size);
+    }
+}
+
+void restore_stack_state(Stack stack) {
+    if (stack.stack_buffer) {
+        memcpy(stack.stack_ptr, stack.stack_buffer, stack.stack_size);
     }
 }
