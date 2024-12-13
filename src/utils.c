@@ -337,3 +337,36 @@ void dump_dict(Dict dict, char dir_name[]) {
         fclose(file);
     }
 }
+
+KV get_key_value(Dict dict, uint8_t pos) {
+    KV kv = {0};
+
+    uint8_t size = get_dict_size(dict);
+
+    if (pos > size) {
+        printf("You requested to get key-value at pos %d, but dict only contains %d elements", pos, size);
+        assert(0);
+    }
+
+    char *ptr = dict.start_addr;
+
+    uint8_t i;
+    for (i = 0; i < size; i++) {
+        if (i == pos) {
+            char *key = ptr;
+            ptr += strlen(ptr) + 1; /* pass key */
+
+            char *value = ptr;
+
+            kv.k = key;
+            kv.v = value;
+
+            break;
+        }
+
+        ptr += strlen(ptr) + 1; /* pass key */
+        ptr += strlen(ptr) + 1; /* pass value */
+    }
+
+    return kv;
+}

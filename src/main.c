@@ -94,6 +94,7 @@ int main() {
 
                         /** Allocate memory for handling client request */
                         Arena *scratch_arena = arena_init(PAGE_SIZE * 10);
+
                         Socket *client_socket_info = (Socket *)arena_alloc(scratch_arena, sizeof(Socket));
                         client_socket_info->type = CLIENT_SOCKET;
                         client_socket_info->fd = client_fd;

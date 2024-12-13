@@ -122,12 +122,12 @@ void router(RequestCtx request_ctx) {
     String url = find_http_request_value("URL", request);
 
     if (strncmp(url.start_addr, URL("/.well-known/assetlinks.json"), strlen(URL("/.well-known/assetlinks.json"))) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
-        char buff[] = "/public/.well-known/assetlinks.json";
-        String new_url = {0};
-        new_url.start_addr = buff;
-        new_url.length = strlen(buff);
+        char str[] = "/public/.well-known/assetlinks.json";
+        String _url = {0};
+        _url.start_addr = str;
+        _url.length = strlen(str);
 
-        public_get(request_ctx, new_url);
+        public_get(request_ctx, _url);
         return;
     }
 
@@ -202,12 +202,12 @@ void public_get(RequestCtx request_ctx, String url) {
     int client_socket = request_ctx.client_socket;
 
     char *path = (char *)arena_alloc(scratch_arena, sizeof('.') + url.length);
-    char *tmp_path = path;
-    *tmp_path = '.';
-    tmp_path++;
-    strncpy(tmp_path, url.start_addr, url.length);
+    char *ptr = path;
+    *ptr = '.';
+    ptr++;
+    strncpy(ptr, url.start_addr, url.length);
 
-    char *public_file_type = file_content_type(scratch_arena, path);
+    char *content_type = file_content_type(scratch_arena, path);
     char *content = find_value(path, arena_data->public_files_dict);
 
     char *response = (char *)scratch_arena->current;
@@ -216,14 +216,10 @@ void public_get(RequestCtx request_ctx, String url) {
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: %s\r\n\r\n"
             "%s",
-            public_file_type, content);
+            content_type, content);
 
-    char *response_end = response;
-    while (*response_end != '\0') {
-        response_end++;
-    }
-
-    scratch_arena->current = response_end + 1;
+    response[strlen(response)] = '\0';
+    scratch_arena->current = response + strlen(response) + 1;
 
     if (send(client_socket, response, strlen(response), 0) == -1) {
     }
@@ -254,34 +250,27 @@ void view_get(RequestCtx request_ctx, char *view, boolean accepts_query_params) 
 
     char *template = find_value(view, arena_data->templates);
 
-    if (replaces.start_addr) {
-        char *template_cpy = (char *)scratch_arena->current;
-        memcpy(template_cpy, template, strlen(template) + 1);
+    char *response = (char *)scratch_arena->current;
+    char *response_headers = response;
 
-        char *ptr = replaces.start_addr;
-        while (ptr < replaces.end_addr) {
-            char *key = ptr;
-            char *value = ptr + strlen(ptr) + 1;
+    char headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+    memcpy(response_headers, headers, strlen(headers));
 
-            replace_val(template_cpy, key, value);
+    char *response_content = response_headers + strlen(headers);
 
-            ptr += strlen(ptr) + 1; /* pass key */
-            ptr += strlen(ptr) + 1; /* pass value */
-        }
+    memcpy(response_content, template, strlen(template));
+    response_content[strlen(template)] = '\0';
 
-        scratch_arena->current = (char *)scratch_arena->current + strlen(template_cpy) + 1;
+    uint8_t size = get_dict_size(replaces);
 
-        /** Re-set template to point to "rendered template copy" */
-        template = template_cpy;
+    uint8_t i;
+    for (i = 0; i < size; i++) {
+        KV kv = get_key_value(replaces, i);
+
+        replace_val(response_content, kv.k, kv.v);
     }
 
-    char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-    size_t response_length = strlen(response_headers) + strlen(template);
-
-    char *response = (char *)arena_alloc(scratch_arena, response_length + 1);
-
-    sprintf(response, "%s%s", response_headers, template);
-    response[response_length] = '\0';
+    scratch_arena->current = response + strlen(response) + 1;
 
     if (send(client_socket, response, strlen(response), 0) == -1) {
     }

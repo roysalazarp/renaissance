@@ -186,6 +186,11 @@ typedef struct {
     TagLocation closing_tag;
 } BlockLocation;
 
+typedef struct {
+    char *k;
+    char *v;
+} KV;
+
 /*
 +-----------------------------------------------------------------------------------+
 |                               function declaration                                |
@@ -265,6 +270,7 @@ int generate_salt(uint8_t *salt, size_t salt_size);
 uint8_t get_dict_size(Dict dict);
 void replace_slashes(char *str);
 void dump_dict(Dict dict, char folder_name[]);
+KV get_key_value(Dict dict, uint8_t pos);
 
 /*
 +-----------------------------------------------------------------------------------+
