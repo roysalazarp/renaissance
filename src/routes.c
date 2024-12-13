@@ -122,15 +122,6 @@ void router(Arena *scratch_arena_raw) {
 
     String url = find_http_request_value("URL", scratch_arena_data->request);
 
-    if (strncmp(url.start_addr, URL("/manifest.json"), strlen(URL("/manifest.json"))) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
-        char buff[] = "/public/manifest.json";
-        String new_url = {0};
-        new_url.start_addr = buff;
-        new_url.length = strlen(buff);
-
-        public_get(scratch_arena_raw, new_url);
-        return;
-    }
     if (strncmp(url.start_addr, URL("/.well-known/assetlinks.json"), strlen(URL("/.well-known/assetlinks.json"))) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
         char buff[] = "/public/.well-known/assetlinks.json";
         String new_url = {0};
