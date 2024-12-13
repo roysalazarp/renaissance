@@ -3,8 +3,8 @@
 DBConnection connection_pool[CONNECTION_POOL_SIZE];
 QueuedRequest queue[MAX_CLIENT_CONNECTIONS];
 
-Arena *global_arena_raw;
-GlobalArenaDataLookup *global_arena_data;
+Arena *arena;
+ArenaDataLookup *arena_data;
 
 int epoll_fd;
 int nfds;
@@ -28,10 +28,10 @@ int main() {
         assert(0);
     }
 
-    global_arena_raw = arena_init(PAGE_SIZE * 50);
+    arena = arena_init(PAGE_SIZE * 50);
 
     /** To look up data stored in arena */
-    global_arena_data = (GlobalArenaDataLookup *)arena_alloc(global_arena_raw, sizeof(GlobalArenaDataLookup));
+    arena_data = (ArenaDataLookup *)arena_alloc(arena, sizeof(ArenaDataLookup));
 
     Dict envs = load_env_variables(ENV_FILE_PATH);
 
@@ -93,14 +93,14 @@ int main() {
                         assert(fcntl(client_fd, F_SETFL, client_fd_flags | O_NONBLOCK) != -1);
 
                         /** Allocate memory for handling client request */
-                        Arena *scratch_arena_raw = arena_init(PAGE_SIZE * 10);
-                        Socket *client_socket_info = (Socket *)arena_alloc(scratch_arena_raw, sizeof(Socket));
+                        Arena *scratch_arena = arena_init(PAGE_SIZE * 10);
+                        Socket *client_socket_info = (Socket *)arena_alloc(scratch_arena, sizeof(Socket));
                         client_socket_info->type = CLIENT_SOCKET;
                         client_socket_info->fd = client_fd;
 
-                        ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)arena_alloc(scratch_arena_raw, sizeof(ScratchArenaDataLookup));
-                        scratch_arena_data->arena = scratch_arena_raw;
-                        scratch_arena_data->client_socket = client_fd;
+                        RequestCtx *request_ctx = (RequestCtx *)arena_alloc(scratch_arena, sizeof(RequestCtx));
+                        request_ctx->scratch_arena = scratch_arena;
+                        request_ctx->client_socket = client_fd;
 
                         event.events = EPOLLIN | EPOLLET;
                         event.data.ptr = client_socket_info;
@@ -117,10 +117,11 @@ int main() {
 
                 case CLIENT_SOCKET: { /** Client socket (aka. client request) ready for read */
                     if (events[i].events & EPOLLIN) {
-                        Arena *scratch_arena_raw = (Arena *)((uint8_t *)socket_info - sizeof(Arena));
+                        Arena *scratch_arena = (Arena *)((uint8_t *)socket_info - sizeof(Arena));
+                        RequestCtx *request_ctx = (RequestCtx *)((uint8_t *)scratch_arena + (sizeof(Arena) + sizeof(Socket)));
 
                         if (setjmp(ctx) == 0) {
-                            router(scratch_arena_raw);
+                            router(*request_ctx);
                         }
 
                         break;
@@ -188,7 +189,7 @@ int main() {
         PQfinish(connection_pool[i].conn);
     }
 
-    arena_free(global_arena_raw);
+    arena_free(arena);
 
     return 0;
 }
@@ -213,13 +214,13 @@ Socket *create_server_socket(uint16_t port) {
 
     assert(listen(server_fd, MAX_CLIENT_CONNECTIONS) != -1);
 
-    Socket *server_socket = arena_alloc(global_arena_raw, sizeof(Socket));
+    Socket *server_socket = arena_alloc(arena, sizeof(Socket));
     server_socket->fd = server_fd;
     server_socket->type = SERVER_SOCKET;
 
-    global_arena_data->socket = server_socket;
+    arena_data->socket = server_socket;
 
-    return global_arena_data->socket;
+    return arena_data->socket;
 }
 
 void sigint_handler(int signo) {

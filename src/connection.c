@@ -69,22 +69,22 @@ void create_connection_pool(Dict envs) {
 
 /**
  * Searches the connection pool for an available connection (where `client.fd` is 0) and assigns
- * the current request (represented by `scratch_arena_raw`) to it; returns `NULL` if the pool is full.
+ * the current request (represented by `scratch_arena`) to it; returns `NULL` if the pool is full.
  *
  * Searches the request queue for an available slot (where `client.fd` is 0) and associates the
- * current request (represented by `scratch_arena_raw`) with it, marking the request as queued;
+ * current request (represented by `scratch_arena`) with it, marking the request as queued;
  * returns a pointer to the assigned queue slot.
  */
-DBConnection *get_available_connection(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+DBConnection *get_available_connection(Arena *scratch_arena) {
+    RequestCtx *request_ctx = (RequestCtx *)((uint8_t *)scratch_arena + (sizeof(Arena) + sizeof(Socket)));
 
     int i;
 
     for (i = 0; i < CONNECTION_POOL_SIZE; i++) {
         if (connection_pool[i].client.fd == 0) {
 
-            connection_pool[i].client.fd = scratch_arena_data->client_socket;
-            connection_pool[i].client.scratch_arena_data = scratch_arena_data;
+            connection_pool[i].client.fd = request_ctx->client_socket;
+            connection_pool[i].client.request_ctx = request_ctx;
 
             DBConnection *connection = &(connection_pool[i]);
 
@@ -96,8 +96,8 @@ DBConnection *get_available_connection(Arena *scratch_arena_raw) {
         if (queue[i].client.fd == 0) {
             /* Available spot in the queue */
 
-            queue[i].client.fd = scratch_arena_data->client_socket;
-            queue[i].client.scratch_arena_data = scratch_arena_data;
+            queue[i].client.fd = request_ctx->client_socket;
+            queue[i].client.request_ctx = request_ctx;
             queue[i].client.queued = 1;
 
             QueuedRequest *queued = &(queue[i]);
@@ -118,7 +118,7 @@ DBConnection *get_available_connection(Arena *scratch_arena_raw) {
     assert(0);
 }
 
-DBQueryCtx WPQsendQueryParams(DBConnection *connection, const char *command, int nParams, const Oid *paramTypes, const char *const *paramValues, const int *paramLengths, const int *paramFormats, int resultFormat) {
+PGresult *WPQsendQueryParams(DBConnection *connection, const char *command, int nParams, const Oid *paramTypes, const char *const *paramValues, const int *paramLengths, const int *paramFormats, int resultFormat) {
     if (PQsendQueryParams(connection->conn, command, nParams, paramTypes, paramValues, paramLengths, paramFormats, resultFormat) == 0) {
         fprintf(stderr, "Query failed to send: %s\n", PQerrorMessage(connection->conn));
         int conn_fd = PQsocket(connection->conn);
@@ -145,11 +145,7 @@ DBQueryCtx WPQsendQueryParams(DBConnection *connection, const char *command, int
 
     PGresult *result = get_result(connection);
 
-    DBQueryCtx output = {0};
-    output.result = result;
-    output.connection = connection;
-
-    return output;
+    return result;
 }
 
 /**

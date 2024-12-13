@@ -4,14 +4,14 @@
  * Loads all public files (such as .js, .css, .json) excluding HTML files, from the specified `base_path`.
  */
 Dict load_public_files(const char *base_path) {
-    char *public_files_paths = (char *)global_arena_raw->current;
+    char *public_files_paths = (char *)arena->current;
     uint8_t public_files_count = 0;
     size_t all_paths_length = 0;
     locate_files(public_files_paths, base_path, NULL, 0, &public_files_count, &all_paths_length);
     char *public_files_paths_end = public_files_paths + all_paths_length;
-    global_arena_raw->current = public_files_paths_end + 1;
+    arena->current = public_files_paths_end + 1;
 
-    char *public_files_dict = (char *)global_arena_raw->current;
+    char *public_files_dict = (char *)arena->current;
     char *tmp_public_files_dict = public_files_dict;
     char *tmp_public_files_paths = public_files_paths;
     char extension[] = ".html";
@@ -48,12 +48,12 @@ Dict load_public_files(const char *base_path) {
      * `public_files_dict`. Shift `public_files_dict` to occupy its memory space to prevent waste. */
     char *start = public_files_paths;
     memcpy(start, public_files_dict, public_files_dict_length);
-    global_arena_data->public_files_dict.start_addr = start;
-    global_arena_data->public_files_dict.end_addr = start + public_files_dict_length;
+    arena_data->public_files_dict.start_addr = start;
+    arena_data->public_files_dict.end_addr = start + public_files_dict_length;
 
-    global_arena_raw->current = global_arena_data->public_files_dict.end_addr + 1;
+    arena->current = arena_data->public_files_dict.end_addr + 1;
 
-    return global_arena_data->public_files_dict;
+    return arena_data->public_files_dict;
 }
 
 /**
@@ -61,16 +61,16 @@ Dict load_public_files(const char *base_path) {
  */
 Dict load_html_components(const char *base_path) {
     /** Find the paths of all html files */
-    char *html_files_paths = (char *)global_arena_raw->current;
+    char *html_files_paths = (char *)arena->current;
     char extension[] = ".html";
     uint8_t html_files_count = 0;
     size_t all_paths_length = 0;
     locate_files(html_files_paths, base_path, extension, 0, &html_files_count, &all_paths_length);
     char *html_files_paths_end = html_files_paths + all_paths_length;
-    global_arena_raw->current = html_files_paths_end + 1;
+    arena->current = html_files_paths_end + 1;
 
     /* A Component is an HTML snippet that may include references to other HTML snippets, i.e., it is composable */
-    char *components_dict = (char *)global_arena_raw->current;
+    char *components_dict = (char *)arena->current;
     char *tmp_components_dict = components_dict;
     char *tmp_filepath = html_files_paths;
 
@@ -133,7 +133,7 @@ Dict load_html_components(const char *base_path) {
     html_raw_components_dict.start_addr = start;
     html_raw_components_dict.end_addr = start + components_dict_length;
 
-    global_arena_raw->current = html_raw_components_dict.end_addr + 1;
+    arena->current = html_raw_components_dict.end_addr + 1;
 
     return html_raw_components_dict;
 }
@@ -147,7 +147,7 @@ Dict load_templates(const char *base_path) {
     uint8_t i;
 
     /* A template is essentially a Component that has been compiled with all its imports. */
-    char *templates_dict = (char *)global_arena_raw->current;
+    char *templates_dict = (char *)arena->current;
     char *tmp_templates_dict = templates_dict;
 
     char *components = html_raw_components.start_addr;
@@ -272,12 +272,12 @@ Dict load_templates(const char *base_path) {
      * space to prevent waste. */
     char *start = html_raw_components.start_addr;
     memcpy(start, templates_dict, templates_dict_length);
-    global_arena_data->templates.start_addr = start;
-    global_arena_data->templates.end_addr = start + templates_dict_length;
+    arena_data->templates.start_addr = start;
+    arena_data->templates.end_addr = start + templates_dict_length;
 
-    global_arena_raw->current = global_arena_data->templates.end_addr + 1;
+    arena->current = arena_data->templates.end_addr + 1;
 
-    return global_arena_data->templates;
+    return arena_data->templates;
 }
 
 void resolve_slots(char *component_markdown, char *import_statement, char **templates) {

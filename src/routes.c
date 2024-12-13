@@ -1,12 +1,11 @@
 #include "headers.h"
 
-void router(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+void router(RequestCtx request_ctx) {
+    Arena *scratch_arena = request_ctx.scratch_arena;
+    int client_socket = request_ctx.client_socket;
 
-    int client_socket = scratch_arena_data->client_socket;
-
-    char *request = (char *)scratch_arena_raw->current;
-    scratch_arena_data->request = scratch_arena_raw->current;
+    char *request = (char *)scratch_arena->current;
+    request_ctx.request = request;
 
     char *tmp_request = request;
 
@@ -34,7 +33,7 @@ void router(Arena *scratch_arena_raw) {
         }
 
         if (incomming_stream_size <= 0) {
-            printf("fd %d - Empty request\n", scratch_arena_data->client_socket);
+            printf("fd %d - Empty request\n", client_socket);
             return;
         }
 
@@ -118,9 +117,9 @@ void router(Arena *scratch_arena_raw) {
     (*tmp_request) = '\0';
     tmp_request++;
 
-    scratch_arena_raw->current = tmp_request;
+    scratch_arena->current = tmp_request;
 
-    String url = find_http_request_value("URL", scratch_arena_data->request);
+    String url = find_http_request_value("URL", request);
 
     if (strncmp(url.start_addr, URL("/.well-known/assetlinks.json"), strlen(URL("/.well-known/assetlinks.json"))) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
         char buff[] = "/public/.well-known/assetlinks.json";
@@ -128,89 +127,90 @@ void router(Arena *scratch_arena_raw) {
         new_url.start_addr = buff;
         new_url.length = strlen(buff);
 
-        public_get(scratch_arena_raw, new_url);
+        public_get(request_ctx, new_url);
         return;
     }
 
     if (strncmp(url.start_addr, "/public", strlen("/public")) == 0 && strncmp(method.start_addr, "GET", method.length) == 0) {
-        public_get(scratch_arena_raw, url);
+        public_get(request_ctx, url);
         return;
     }
 
     if (strncmp(url.start_addr, URL("/"), strlen(URL("/"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            home_get(scratch_arena_raw);
+            home_get(request_ctx);
             return;
         }
     }
 
     if (strncmp(url.start_addr, URL("/test"), strlen(URL("/test"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            test_get(scratch_arena_raw);
+            test_get(request_ctx);
             return;
         }
     }
 
     if (strncmp(url.start_addr, URL("/login"), strlen(URL("/login"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/login"), strlen(URL_WITH_QUERY("/login"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            view_get(scratch_arena_raw, "login", true);
+            view_get(request_ctx, "login", true);
             return;
         }
     }
 
     if (strncmp(url.start_addr, URL("/login/create-session"), strlen(URL("/login/create-session"))) == 0) {
         if (strncmp(method.start_addr, "POST", method.length) == 0) {
-            login_create_session_post(scratch_arena_raw);
+            login_create_session_post(request_ctx);
             return;
         }
     }
 
     if (strncmp(url.start_addr, URL("/register"), strlen(URL("/register"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/register"), strlen(URL_WITH_QUERY("/register"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            view_get(scratch_arena_raw, "register", true);
+            view_get(request_ctx, "register", true);
             return;
         }
     }
 
     if (strncmp(url.start_addr, URL("/register/create-account"), strlen(URL("/register/create-account"))) == 0) {
         if (strncmp(method.start_addr, "POST", method.length) == 0) {
-            register_create_account_post(scratch_arena_raw);
+            register_create_account_post(request_ctx);
             return;
         }
     }
 
     if (strncmp(url.start_addr, URL("/auth"), strlen(URL("/auth"))) == 0 || strncmp(url.start_addr, URL_WITH_QUERY("/auth"), strlen(URL_WITH_QUERY("/auth"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
-            view_get(scratch_arena_raw, "auth", true);
+            view_get(request_ctx, "auth", true);
             return;
         }
     }
 
     if (strncmp(url.start_addr, URL("/auth/validate-email"), strlen(URL("/auth/validate-email"))) == 0) {
         if (strncmp(method.start_addr, "POST", method.length) == 0) {
-            auth_validate_email_post(scratch_arena_raw);
+            auth_validate_email_post(request_ctx);
             return;
         }
     }
 
-    view_get(scratch_arena_raw, "not_found", false);
+    view_get(request_ctx, "not_found", false);
 
     return;
 }
 
-void public_get(Arena *scratch_arena_raw, String url) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+void public_get(RequestCtx request_ctx, String url) {
+    Arena *scratch_arena = request_ctx.scratch_arena;
+    int client_socket = request_ctx.client_socket;
 
-    char *path = (char *)arena_alloc(scratch_arena_raw, sizeof('.') + url.length);
+    char *path = (char *)arena_alloc(scratch_arena, sizeof('.') + url.length);
     char *tmp_path = path;
     *tmp_path = '.';
     tmp_path++;
     strncpy(tmp_path, url.start_addr, url.length);
 
-    char *public_file_type = file_content_type(scratch_arena_raw, path);
-    char *content = find_value(path, global_arena_data->public_files_dict);
+    char *public_file_type = file_content_type(scratch_arena, path);
+    char *content = find_value(path, arena_data->public_files_dict);
 
-    char *response = (char *)scratch_arena_raw->current;
+    char *response = (char *)scratch_arena->current;
 
     sprintf(response,
             "HTTP/1.1 200 OK\r\n"
@@ -223,15 +223,14 @@ void public_get(Arena *scratch_arena_raw, String url) {
         response_end++;
     }
 
-    scratch_arena_raw->current = response_end + 1;
+    scratch_arena->current = response_end + 1;
 
-    int client_socket = scratch_arena_data->client_socket;
     if (send(client_socket, response, strlen(response), 0) == -1) {
     }
 
     close(client_socket);
 
-    arena_free(scratch_arena_raw);
+    arena_free(scratch_arena);
 }
 
 /**
@@ -239,24 +238,24 @@ void public_get(Arena *scratch_arena_raw, String url) {
  * authentication. when `accepts_query_params` is true, query values are
  * rendered in their respective template placeholders.
  */
-void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+void view_get(RequestCtx request_ctx, char *view, boolean accepts_query_params) {
+    Arena *scratch_arena = request_ctx.scratch_arena;
+    int client_socket = request_ctx.client_socket;
+    char *request = request_ctx.request;
 
     Dict replaces = {0};
     if (accepts_query_params) {
-        String query_params = find_http_request_value("QUERY_PARAMS", scratch_arena_data->request);
+        String query_params = find_http_request_value("QUERY_PARAMS", request);
 
         if (query_params.length > 0) {
-            replaces = parse_and_decode_params(scratch_arena_raw, query_params);
+            replaces = parse_and_decode_params(scratch_arena, query_params);
         }
     }
 
-    int client_socket = scratch_arena_data->client_socket;
-
-    char *template = find_value(view, global_arena_data->templates);
+    char *template = find_value(view, arena_data->templates);
 
     if (replaces.start_addr) {
-        char *template_cpy = (char *)scratch_arena_raw->current;
+        char *template_cpy = (char *)scratch_arena->current;
         memcpy(template_cpy, template, strlen(template) + 1);
 
         char *ptr = replaces.start_addr;
@@ -270,7 +269,7 @@ void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params
             ptr += strlen(ptr) + 1; /* pass value */
         }
 
-        scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
+        scratch_arena->current = (char *)scratch_arena->current + strlen(template_cpy) + 1;
 
         /** Re-set template to point to "rendered template copy" */
         template = template_cpy;
@@ -279,7 +278,7 @@ void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
     size_t response_length = strlen(response_headers) + strlen(template);
 
-    char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
+    char *response = (char *)arena_alloc(scratch_arena, response_length + 1);
 
     sprintf(response, "%s%s", response_headers, template);
     response[response_length] = '\0';
@@ -289,61 +288,39 @@ void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params
 
     close(client_socket);
 
-    arena_free(scratch_arena_raw);
+    arena_free(scratch_arena);
 }
 
 /**
  * A dummy page used for testing purposes.
  */
-void test_get(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+void test_get(RequestCtx request_ctx) {
+    Arena *scratch_arena = request_ctx.scratch_arena;
+    int client_socket = request_ctx.client_socket;
+    char *request = request_ctx.request;
 
-    DBConnection *connection = get_available_connection(scratch_arena_raw);
+    DBConnection *connection = get_available_connection(scratch_arena);
 
-    const char *command = "SELECT * FROM app.countries WHERE id = $1 OR id = $2";
-    Oid paramTypes[2] = {23, 23};
+    const char *command_1 = "SELECT * FROM app.countries WHERE id = $1 OR id = $2";
+    Oid paramTypes_1[2] = {23, 23};
     int id1 = htonl(3);
     int id2 = htonl(23);
-    const char *paramValues[2];
-    paramValues[0] = (char *)&id1;
-    paramValues[1] = (char *)&id2;
-    int paramLengths[2] = {sizeof(id1), sizeof(id2)};
-    int paramFormats[2] = {1, 1};
-    int resultFormat = 0;
+    const char *paramValues_1[2];
+    paramValues_1[0] = (char *)&id1;
+    paramValues_1[1] = (char *)&id2;
+    int paramLengths_1[2] = {sizeof(id1), sizeof(id2)};
+    int paramFormats_1[2] = {1, 1};
 
-    if (PQsendQueryParams(connection->conn, command, 2, paramTypes, paramValues, paramLengths, paramFormats, resultFormat) == 0) {
-        fprintf(stderr, "Query failed to send: %s\n", PQerrorMessage(connection->conn));
-        int _conn_fd = PQsocket(connection->conn);
-        printf("socket: %d\n", _conn_fd);
-    }
+    PGresult *result_1 = WPQsendQueryParams(connection, command_1, N2_PARAMS, paramTypes_1, paramValues_1, paramLengths_1, paramFormats_1, TEXT);
 
-    int _conn_fd = PQsocket(connection->conn);
+    print_query_result(result_1);
 
-    event.events = EPOLLIN | EPOLLET;
-    event.data.ptr = connection;
-    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, _conn_fd, &event);
-
-    if (connection->client.queued) {
-        int r = setjmp(connection->client.jmp_buf);
-        if (r == 0) {
-            longjmp(db_ctx, 1);
-        }
-    } else {
-        int r = setjmp(connection->client.jmp_buf);
-        if (r == 0) {
-            longjmp(ctx, 1);
-        }
-    }
-
-    PGresult *result = get_result(connection);
-
-    print_query_result(result);
-    PQclear(result);
+    PQclear(result_1);
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
-    char *template = find_value("test", global_arena_data->templates);
+    char *template = find_value("test", arena_data->templates);
 
-    char *template_cpy = (char *)scratch_arena_raw->current;
+    char *template_cpy = (char *)scratch_arena->current;
 
     memcpy(template_cpy, template, strlen(template) + 1);
 
@@ -390,70 +367,49 @@ void test_get(Arena *scratch_arena_raw) {
 
     render_for(template_cpy, "cells", 1, key_value);
 
-    scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
+    scratch_arena->current = (char *)scratch_arena->current + strlen(template_cpy) + 1;
 
     size_t response_length = strlen(response_headers) + strlen(template_cpy);
 
-    char *response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
+    char *response = (char *)arena_alloc(scratch_arena, response_length + 1);
 
     sprintf(response, "%s%s", response_headers, template_cpy);
     response[response_length] = '\0';
 
-    int client_socket = scratch_arena_data->client_socket;
     if (send(client_socket, response, strlen(response), 0) == -1) {
     }
 
     close(client_socket);
 
-    /* SSL_shutdown(scratch_arena_data->ssl); */
-    /* SSL_free(scratch_arena_data->ssl); */
-
-    close(scratch_arena_data->client_socket);
-    printf("Terminated - client-fd: %d\n", scratch_arena_data->client_socket);
-
-    uint8_t was_queued = connection->client.queued;
-
-    /* release connection for others to use */
-    memset(&(connection->client), 0, sizeof(Client));
-
-    int conn_socket = PQsocket(connection->conn);
-
-    event.events = EPOLLOUT | EPOLLET;
-    event.data.ptr = connection;
-    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_socket, &event);
-
-    arena_free(scratch_arena_raw);
-
-    if (was_queued) {
-        longjmp(db_ctx, 1); /** Jump back */
-    } else {
-        longjmp(ctx, 1); /** Jump back */
-    }
+    release_request_resources_and_exit(scratch_arena, connection);
 }
 
-void home_get(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
-    DBConnection *connection = get_available_connection(scratch_arena_raw);
+void home_get(RequestCtx request_ctx) {
+    Arena *scratch_arena = request_ctx.scratch_arena;
+    int client_socket = request_ctx.client_socket;
+    char *request = request_ctx.request;
 
-    char *template = find_value("home", global_arena_data->templates);
+    DBConnection *connection = get_available_connection(scratch_arena);
+
+    char *template = find_value("home", arena_data->templates);
 
     char *response = NULL;
 
-    Dict user = is_authenticated(scratch_arena_raw, connection);
+    Dict user = is_authenticated(request_ctx, connection);
     if (user.start_addr) {
-        char *template_cpy = (char *)scratch_arena_raw->current;
+        char *template_cpy = (char *)scratch_arena->current;
 
         memcpy(template_cpy, template, strlen(template) + 1);
 
         render_val(template_cpy, "authenticated", "Account");
         replace_val(template_cpy, "authenticated_redirect", "/account");
 
-        scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
+        scratch_arena->current = (char *)scratch_arena->current + strlen(template_cpy) + 1;
 
         char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
         size_t response_length = strlen(response_headers) + strlen(template_cpy);
 
-        response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
+        response = (char *)arena_alloc(scratch_arena, response_length + 1);
 
         sprintf(response, "%s%s", response_headers, template_cpy);
         response[response_length] = '\0';
@@ -461,77 +417,59 @@ void home_get(Arena *scratch_arena_raw) {
         goto send_response;
     }
 
-    char *template_cpy = (char *)scratch_arena_raw->current;
+    char *template_cpy = (char *)scratch_arena->current;
 
     memcpy(template_cpy, template, strlen(template) + 1);
 
     render_val(template_cpy, "authenticated", "Login");
     replace_val(template_cpy, "authenticated_redirect", "/auth");
 
-    scratch_arena_raw->current = (char *)scratch_arena_raw->current + strlen(template_cpy) + 1;
+    scratch_arena->current = (char *)scratch_arena->current + strlen(template_cpy) + 1;
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
     size_t response_length = strlen(response_headers) + strlen(template_cpy);
 
-    response = (char *)arena_alloc(scratch_arena_raw, response_length + 1);
+    response = (char *)arena_alloc(scratch_arena, response_length + 1);
 
     sprintf(response, "%s%s", response_headers, template_cpy);
     response[response_length] = '\0';
 
 send_response:
-    if (send(scratch_arena_data->client_socket, response, strlen(response), 0) == -1) {
+    if (send(client_socket, response, strlen(response), 0) == -1) {
     }
 
-    close(scratch_arena_data->client_socket);
+    close(client_socket);
 
-    release_request_resources_and_exit(scratch_arena_raw, connection);
+    release_request_resources_and_exit(scratch_arena, connection);
 }
 
-void auth_validate_email_post(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+void auth_validate_email_post(RequestCtx request_ctx) {
+    Arena *scratch_arena = request_ctx.scratch_arena;
+    int client_socket = request_ctx.client_socket;
+    char *request = request_ctx.request;
 
-    DBConnection *connection = get_available_connection(scratch_arena_raw);
+    DBConnection *connection = get_available_connection(scratch_arena);
 
-    String body = find_body(scratch_arena_data->request);
-    Dict params = parse_and_decode_params(scratch_arena_raw, body);
+    String body = find_body(request);
+    Dict params = parse_and_decode_params(scratch_arena, body);
 
     char *email = find_value("email", params);
 
-    const char *command = "SELECT email FROM app.users WHERE email = $1";
-    Oid paramTypes[1] = {25};
-    const char *paramValues[1];
-    paramValues[0] = email;
-    int paramLengths[1] = {0};
-    int paramFormats[1] = {0};
-    int resultFormat = 0;
+    const char *command_1 = "SELECT email FROM app.users WHERE email = $1";
+    Oid paramTypes_1[1] = {25};
+    const char *paramValues_1[1];
+    paramValues_1[0] = email;
+    int paramLengths_1[1] = {0};
+    int paramFormats_1[1] = {0};
 
-    if (PQsendQueryParams(connection->conn, command, 1, paramTypes, paramValues, paramLengths, paramFormats, resultFormat) == 0) {
-        fprintf(stderr, "Query failed to send: %s\n", PQerrorMessage(connection->conn));
-    }
+    PGresult *result_1 = WPQsendQueryParams(connection, command_1, N1_PARAMS, paramTypes_1, paramValues_1, paramLengths_1, paramFormats_1, TEXT);
 
-    int conn_socket = PQsocket(connection->conn);
+    print_query_result(result_1);
 
-    event.events = EPOLLIN | EPOLLET;
-    event.data.ptr = connection;
-    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_socket, &event);
+    int rows = PQntuples(result_1);
 
-    if (connection->client.queued) {
-        int r = setjmp(connection->client.jmp_buf);
-        if (r == 0) {
-            longjmp(db_ctx, 1);
-        }
-    } else {
-        int r = setjmp(connection->client.jmp_buf);
-        if (r == 0) {
-            longjmp(ctx, 1);
-        }
-    }
-
-    PGresult *result = get_result(connection);
-
-    int rows = PQntuples(result);
-    print_query_result(result);
-    PQclear(result);
+    print_query_result(result_1);
+    PQclear(result_1);
 
     char *response_headers[200];
     memset(response_headers, 0, sizeof(response_headers));
@@ -544,39 +482,23 @@ void auth_validate_email_post(Arena *scratch_arena_raw) {
         sprintf((char *)response_headers, "HTTP/1.1 200 OK\r\nHX-Redirect: /register?email=%.*s\r\n\r\n", (int)encoded_email.length, encoded_email.start_addr);
     }
 
-    int client_socket = scratch_arena_data->client_socket;
     if (send(client_socket, response_headers, strlen((char *)response_headers), 0) == -1) {
     }
 
     close(client_socket);
 
-    uint8_t was_queued = connection->client.queued;
-
-    /* release connection for others to use */
-    memset(&(connection->client), 0, sizeof(Client));
-
-    conn_socket = PQsocket(connection->conn);
-
-    event.events = EPOLLOUT | EPOLLET;
-    event.data.ptr = connection;
-    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_socket, &event);
-
-    arena_free(scratch_arena_raw);
-
-    if (was_queued) {
-        longjmp(db_ctx, 1); /** Jump back */
-    } else {
-        longjmp(ctx, 1); /** Jump back */
-    }
+    release_request_resources_and_exit(scratch_arena, connection);
 }
 
-void register_create_account_post(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+void register_create_account_post(RequestCtx request_ctx) {
+    Arena *scratch_arena = request_ctx.scratch_arena;
+    int client_socket = request_ctx.client_socket;
+    char *request = request_ctx.request;
 
-    DBConnection *connection = get_available_connection(scratch_arena_raw);
+    DBConnection *connection = get_available_connection(scratch_arena);
 
-    String body = find_body(scratch_arena_data->request);
-    Dict params = parse_and_decode_params(scratch_arena_raw, body);
+    String body = find_body(request);
+    Dict params = parse_and_decode_params(scratch_arena, body);
 
     char *email = find_value("email", params);
     char *password = find_value("password", params);
@@ -621,77 +543,51 @@ void register_create_account_post(Arena *scratch_arena_raw) {
         fprintf(stderr, "Failed to verify password\nError code: %d\n", errno);
     }
 
-    printf("%s\n", secure_password);
+    const char *command_1 = "INSERT INTO app.users (email, password) VALUES ($1, $2)";
+    Oid paramTypes_1[2] = {25, 25};
+    const char *paramValues_1[2];
+    paramValues_1[0] = email;
+    paramValues_1[1] = secure_password;
+    int paramLengths_1[2] = {0, 0};
+    int paramFormats_1[2] = {0, 0};
 
-    const char *command = "INSERT INTO app.users (email, password) VALUES ($1, $2)";
-    Oid paramTypes[2] = {25, 25};
-    const char *paramValues[2];
-    paramValues[0] = email;
-    paramValues[1] = secure_password;
-    int paramLengths[2] = {0, 0};
-    int paramFormats[2] = {0, 0};
-    int resultFormat = 0;
+    PGresult *result_1 = WPQsendQueryParams(connection, command_1, N2_PARAMS, paramTypes_1, paramValues_1, paramLengths_1, paramFormats_1, TEXT);
 
-    if (PQsendQueryParams(connection->conn, command, 2, paramTypes, paramValues, paramLengths, paramFormats, resultFormat) == 0) {
-        fprintf(stderr, "Query failed to send: %s\n", PQerrorMessage(connection->conn));
-        int _conn_fd = PQsocket(connection->conn);
-        printf("socket: %d", _conn_fd);
-    }
+    print_query_result(result_1);
 
-    int _conn_fd = PQsocket(connection->conn);
-
-    event.events = EPOLLIN | EPOLLET;
-    event.data.ptr = connection;
-    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, _conn_fd, &event);
-
-    if (connection->client.queued) {
-        int r = setjmp(connection->client.jmp_buf);
-        if (r == 0) {
-            longjmp(db_ctx, 1);
-        }
-    } else {
-        int r = setjmp(connection->client.jmp_buf);
-        if (r == 0) {
-            longjmp(ctx, 1);
-        }
-    }
-
-    PGresult *result = get_result(connection);
-    print_query_result(result);
-    PQclear(result);
+    PQclear(result_1);
 
     char response_headers[] = "HTTP/1.1 200 OK\r\nHX-Redirect: /\r\n\r\n";
 
-    int client_socket = scratch_arena_data->client_socket;
     if (send(client_socket, response_headers, strlen((char *)response_headers), 0) == -1) {
     }
 
     close(client_socket);
 
-    release_request_resources_and_exit(scratch_arena_raw, connection);
+    release_request_resources_and_exit(scratch_arena, connection);
 }
 
-void login_create_session_post(Arena *scratch_arena_raw) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+void login_create_session_post(RequestCtx request_ctx) {
+    Arena *scratch_arena = request_ctx.scratch_arena;
+    int client_socket = request_ctx.client_socket;
+    char *request = request_ctx.request;
 
-    DBConnection *connection = get_available_connection(scratch_arena_raw);
+    DBConnection *connection = get_available_connection(scratch_arena);
 
-    String body = find_body(scratch_arena_data->request);
-    Dict params = parse_and_decode_params(scratch_arena_raw, body);
+    String body = find_body(request);
+    Dict params = parse_and_decode_params(scratch_arena, body);
 
     char *email = find_value("email", params);
 
     const char *command_1 = "SELECT id, password FROM app.users WHERE email = $1";
-
     Oid paramTypes_1[N1_PARAMS] = {25};
     const char *paramValues_1[N1_PARAMS];
     paramValues_1[0] = email;
     int paramLengths_1[N1_PARAMS] = {0};
     int paramFormats_1[N1_PARAMS] = {0};
 
-    DBQueryCtx query_ctx_1 = WPQsendQueryParams(connection, command_1, N1_PARAMS, paramTypes_1, paramValues_1, paramLengths_1, paramFormats_1, BINARY);
+    PGresult *result_1 = WPQsendQueryParams(connection, command_1, N1_PARAMS, paramTypes_1, paramValues_1, paramLengths_1, paramFormats_1, BINARY);
 
-    PGresult *result_1 = query_ctx_1.result;
     print_query_result(result_1);
 
     char *password = find_value("password", params);
@@ -716,14 +612,12 @@ void login_create_session_post(Arena *scratch_arena_raw) {
     int paramLengths_2[N1_PARAMS] = {16};
     int paramFormats_2[N1_PARAMS] = {1};
 
-    DBQueryCtx query_ctx_2 = WPQsendQueryParams(connection, command_2, N1_PARAMS, paramTypes_2, paramValues_2, paramLengths_2, paramFormats_2, TEXT);
+    PGresult *result_2 = WPQsendQueryParams(connection, command_2, N1_PARAMS, paramTypes_2, paramValues_2, paramLengths_2, paramFormats_2, TEXT);
 
     PQclear(result_1);
-
-    PGresult *result_2 = query_ctx_2.result;
     print_query_result(result_2);
 
-    char *response = (char *)scratch_arena_raw->current;
+    char *response = (char *)scratch_arena->current;
 
     char *session_id = PQgetvalue(result_2, 0, 0);
     char *expires_at = PQgetvalue(result_2, 0, 1);
@@ -736,22 +630,23 @@ void login_create_session_post(Arena *scratch_arena_raw) {
 
     PQclear(result_2);
 
-    scratch_arena_raw->current = response + strlen(response) + 1;
+    scratch_arena->current = response + strlen(response) + 1;
 
-    if (send(scratch_arena_data->client_socket, response, strlen(response), 0) == -1) {
+    if (send(client_socket, response, strlen(response), 0) == -1) {
     }
 
-    close(scratch_arena_data->client_socket);
+    close(client_socket);
 
-    release_request_resources_and_exit(scratch_arena_raw, connection);
+    release_request_resources_and_exit(scratch_arena, connection);
 }
 
-Dict is_authenticated(Arena *scratch_arena_raw, DBConnection *connection) {
-    ScratchArenaDataLookup *scratch_arena_data = (ScratchArenaDataLookup *)((uint8_t *)scratch_arena_raw + (sizeof(Arena) + sizeof(Socket)));
+Dict is_authenticated(RequestCtx request_ctx, DBConnection *connection) {
+    Arena *scratch_arena = request_ctx.scratch_arena;
+    char *request = request_ctx.request;
 
     Dict user = {0};
 
-    String cookie = find_http_request_value("Cookie", scratch_arena_data->request);
+    String cookie = find_http_request_value("Cookie", request);
     if (cookie.start_addr && cookie.length) {
         String session_id_reference = find_cookie_value("session_id", cookie);
         if (session_id_reference.start_addr && session_id_reference.length) {
@@ -775,14 +670,13 @@ Dict is_authenticated(Arena *scratch_arena_raw, DBConnection *connection) {
             int paramLengths_1[N1_PARAMS] = {16};
             int paramFormats_1[N1_PARAMS] = {1};
 
-            DBQueryCtx query_ctx_1 = WPQsendQueryParams(connection, command_1, N1_PARAMS, paramTypes_1, paramValues_1, paramLengths_1, paramFormats_1, TEXT);
-            PGresult *result_1 = query_ctx_1.result;
+            PGresult *result_1 = WPQsendQueryParams(connection, command_1, N1_PARAMS, paramTypes_1, paramValues_1, paramLengths_1, paramFormats_1, TEXT);
 
             int num_rows = PQntuples(result_1);
             if (num_rows) {
                 print_query_result(result_1);
 
-                char *user_info = (char *)scratch_arena_raw->current;
+                char *user_info = (char *)scratch_arena->current;
                 char *tmp_user_info = user_info;
 
                 char *user_id = PQgetvalue(result_1, 0, 0);
@@ -809,7 +703,7 @@ Dict is_authenticated(Arena *scratch_arena_raw, DBConnection *connection) {
                 user.start_addr = user_info;
                 user.end_addr = tmp_user_info;
 
-                scratch_arena_raw->current = tmp_user_info + 1;
+                scratch_arena->current = tmp_user_info + 1;
 
                 PQclear(result_1);
 
@@ -821,7 +715,7 @@ Dict is_authenticated(Arena *scratch_arena_raw, DBConnection *connection) {
     return user;
 }
 
-void release_request_resources_and_exit(Arena *scratch_arena_raw, DBConnection *connection) {
+void release_request_resources_and_exit(Arena *scratch_arena, DBConnection *connection) {
     uint8_t was_request_queued = connection->client.queued;
 
     /* Set connection as unused */
@@ -833,7 +727,7 @@ void release_request_resources_and_exit(Arena *scratch_arena_raw, DBConnection *
     event.data.ptr = connection;
     epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn_socket, &event);
 
-    arena_free(scratch_arena_raw);
+    arena_free(scratch_arena);
 
     if (was_request_queued) {
         longjmp(db_ctx, 1);

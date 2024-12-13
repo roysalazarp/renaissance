@@ -7,7 +7,7 @@ Dict load_env_variables(const char *filepath) {
 
     assert(file_size != 0);
 
-    char *envs = (char *)global_arena_raw->current;
+    char *envs = (char *)arena->current;
     char *p_dict_buffer = envs;
 
     char *line = file_content;
@@ -154,7 +154,7 @@ Dict load_env_variables(const char *filepath) {
         processed_value = false;
     }
 
-    global_arena_raw->current = p_dict_buffer + 1;
+    arena->current = p_dict_buffer + 1;
 
     free(file_content);
     file_content = NULL;

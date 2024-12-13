@@ -135,14 +135,14 @@ typedef struct {
 } Arena;
 
 typedef struct {
-    Arena *arena;
+    Arena *scratch_arena;
     int client_socket;
     char *request;
-} ScratchArenaDataLookup;
+} RequestCtx;
 
 typedef struct {
     int fd;
-    ScratchArenaDataLookup *scratch_arena_data;
+    RequestCtx *request_ctx;
     jmp_buf jmp_buf;
     uint8_t queued;
 } Client;
@@ -175,7 +175,7 @@ typedef struct {
     Socket *socket;
     Dict public_files_dict;
     Dict templates;
-} GlobalArenaDataLookup;
+} ArenaDataLookup;
 
 typedef char uuid_str_t[37];
 
@@ -219,23 +219,23 @@ size_t html_minify(char *buffer, char *html, size_t html_length);
 /** connection.c */
 
 void create_connection_pool(Dict envs);
-DBConnection *get_available_connection(Arena *scratch_arena_raw);
-DBQueryCtx WPQsendQueryParams(DBConnection *connection, const char *command, int nParams, const Oid *paramTypes, const char *const *paramValues, const int *paramLengths, const int *paramFormats, int resultFormat);
+DBConnection *get_available_connection(Arena *scratch_arena);
+PGresult *WPQsendQueryParams(DBConnection *connection, const char *command, int nParams, const Oid *paramTypes, const char *const *paramValues, const int *paramLengths, const int *paramFormats, int resultFormat);
 PGresult *get_result(DBConnection *connection);
 void print_query_result(PGresult *query_result);
 
 /** routes.c */
 
-void router(Arena *scratch_arena_raw);
-void public_get(Arena *scratch_arena_raw, String url);
-void view_get(Arena *scratch_arena_raw, char *view, boolean accepts_query_params);
-void test_get(Arena *scratch_arena_raw);
-void home_get(Arena *scratch_arena_raw);
-void auth_validate_email_post(Arena *scratch_arena_raw);
-void register_create_account_post(Arena *scratch_arena_raw);
-void login_create_session_post(Arena *scratch_arena_raw);
-void release_request_resources_and_exit(Arena *scratch_arena_raw, DBConnection *connection);
-Dict is_authenticated(Arena *scratch_arena_raw, DBConnection *connection);
+void router(RequestCtx request_ctx);
+void public_get(RequestCtx request_ctx, String url);
+void view_get(RequestCtx request_ctx, char *view, boolean accepts_query_params);
+void test_get(RequestCtx request_ctx);
+void home_get(RequestCtx request_ctx);
+void auth_validate_email_post(RequestCtx request_ctx);
+void register_create_account_post(RequestCtx request_ctx);
+void login_create_session_post(RequestCtx request_ctx);
+void release_request_resources_and_exit(Arena *scratch_arena, DBConnection *connection);
+Dict is_authenticated(RequestCtx request_ctx, DBConnection *connection);
 
 int copy_string_into_buffer(char *buffer, const char *string);
 int validate_email(char *error_message_buffer, const char *email);
@@ -247,12 +247,12 @@ int validate_repeat_password(char *error_message_buffer, const char *password, c
 String find_http_request_value(const char key[], char *request);
 String find_body(const char *request);
 String find_body_value(const char key[], String body);
-char *file_content_type(Arena *scratch_arena_raw, const char *path);
+char *file_content_type(Arena *scratch_arena, const char *path);
 char char_to_hex(unsigned char nibble); /** TODO: Review this function */
 char hex_to_char(unsigned char c);      /** TODO: Review this function */
 size_t url_encode_utf8(char **string, size_t length);
 size_t url_decode_utf8(char **string, size_t length);
-Dict parse_and_decode_params(Arena *scratch_arena_raw, String raw_query_params);
+Dict parse_and_decode_params(Arena *scratch_arena, String raw_query_params);
 String find_cookie_value(const char *key, String cookies);
 
 /** utils.c */
@@ -275,8 +275,8 @@ void dump_dict(Dict dict, char folder_name[]);
 extern DBConnection connection_pool[CONNECTION_POOL_SIZE];
 extern QueuedRequest queue[MAX_CLIENT_CONNECTIONS];
 
-extern Arena *global_arena_raw;
-extern GlobalArenaDataLookup *global_arena_data;
+extern Arena *arena;
+extern ArenaDataLookup *arena_data;
 
 extern int epoll_fd;
 extern int nfds;
