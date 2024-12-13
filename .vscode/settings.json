@@ -15,6 +15,7 @@
         "utility": "c",
         "rand.h": "c",
         "uuid.h": "c",
-        "*.tcc": "c"
+        "*.tcc": "c",
+        "headers.h": "c"
     }
 }

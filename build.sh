@@ -15,6 +15,8 @@ rm -rf "$BUILD_DIR"
 # Create the build directory if it doesn't exist
 mkdir -p "$BUILD_DIR"
 
+SRC_FILES=$(find ./src -name "*.c")
+
 if [ "$BUILD_ENV" == "prod" ]; then
     echo "Building for production..."
   
@@ -22,7 +24,8 @@ if [ "$BUILD_ENV" == "prod" ]; then
         -std=c89 \
         -g \
         -o "$BUILD_DIR/app" \
-        main.c \
+        $SRC_FILES \
+        -I./src \
         -I/usr/include/postgresql \
         -lpq \
         -largon2 \
@@ -45,7 +48,8 @@ elif [ "$BUILD_ENV" == "dev" ]; then
         -Wno-unused-variable \
         -Wno-unused-parameter \
         -o "$BUILD_DIR/app" \
-        main.c \
+        $SRC_FILES \
+        -I./src \
         -I/usr/include/postgresql \
         -lpq \
         -largon2 \
