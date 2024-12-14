@@ -1,0 +1,13 @@
+<x-component-def name="layout">
+    <div class="w-full text-white flex flex-col items-center h-screen">
+        <div class="w-full max-w-xl px-2 py-2">
+            <x-component name="top_bar" />
+        </div>
+        <div class="w-full max-w-xl flex-1 px-2 pb-4 flex flex-col overflow-y-scroll">
+            <x-slot />
+        </div>
+        <div class="w-full max-w-xl">
+            <x-component name="bottom_nav" />
+        </div>
+    </div>
+</x-component-def>

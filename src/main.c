@@ -93,7 +93,7 @@ int main() {
                         assert(fcntl(client_fd, F_SETFL, client_fd_flags | O_NONBLOCK) != -1);
 
                         /** Allocate memory for handling client request */
-                        Arena *scratch_arena = arena_init(PAGE_SIZE * 10);
+                        Arena *scratch_arena = arena_init(PAGE_SIZE * 30);
 
                         Socket *client_socket_info = (Socket *)arena_alloc(scratch_arena, sizeof(Socket));
                         client_socket_info->type = CLIENT_SOCKET;
