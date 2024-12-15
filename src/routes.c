@@ -143,6 +143,13 @@ void router(RequestCtx request_ctx) {
         }
     }
 
+    if (strncmp(url.start_addr, URL("/profile"), strlen(URL("/profile"))) == 0) {
+        if (strncmp(method.start_addr, "GET", method.length) == 0) {
+            view_get(request_ctx, "profile", false);
+            return;
+        }
+    }
+
     if (strncmp(url.start_addr, URL("/test"), strlen(URL("/test"))) == 0) {
         if (strncmp(method.start_addr, "GET", method.length) == 0) {
             test_get(request_ctx);
@@ -390,7 +397,6 @@ void home_get(RequestCtx request_ctx) {
 
         memcpy(template_cpy, template, strlen(template) + 1);
 
-        render_val(template_cpy, "authenticated", "Account");
         replace_val(template_cpy, "authenticated_redirect", "/account");
 
         scratch_arena->current = (char *)scratch_arena->current + strlen(template_cpy) + 1;
@@ -410,7 +416,6 @@ void home_get(RequestCtx request_ctx) {
 
     memcpy(template_cpy, template, strlen(template) + 1);
 
-    render_val(template_cpy, "authenticated", "Login");
     replace_val(template_cpy, "authenticated_redirect", "/auth");
 
     scratch_arena->current = (char *)scratch_arena->current + strlen(template_cpy) + 1;

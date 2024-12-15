@@ -9,15 +9,20 @@
         <body class="bg-black">
             <x-component name="layout">
                 <x-template>
-                    <div class="py-2 mb-3">
-                        <h1 class="text-3xl font-agbalumo text-[#01B269]">Little Chef</h1>
+                    <div class="w-full max-w-xl px-2 py-2">
+                        <x-component name="top_bar" />
                     </div>
-                    <div class="space-y-4 flex-1">
-                        <x-component name="food_card" />
-                        <x-component name="food_card" />
-                        <x-component name="food_card" />
-                        <x-component name="food_card" />
-                        <x-component name="food_card" />
+                    <div class="w-full max-w-xl flex-1 px-2 pb-4 flex flex-col overflow-y-scroll">
+                        <div class="py-2 mb-3">
+                            <h1 class="text-3xl font-agbalumo text-[#01B269]">Little Chef</h1>
+                        </div>
+                        <div class="space-y-4 flex-1">
+                            <x-component name="food_card" />
+                            <x-component name="food_card" />
+                            <x-component name="food_card" />
+                            <x-component name="food_card" />
+                            <x-component name="food_card" />
+                        </div>
                     </div>
                 </x-template>
             </x-component>
